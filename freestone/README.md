@@ -4,7 +4,7 @@ A personal MCP server that extends Claude Code with calendar, mail, and file acc
 
 ## Status
 
-**Phase 1A** — Read-only MVP with iCloud providers.
+**Phase 1B** — Read-only MVP with iCloud and Google providers.
 
 ## Install
 
@@ -27,7 +27,7 @@ cp example.access.rules ~/.config/freestone/access.rules
 
 Edit `config.toml` and uncomment the providers you want. Edit `access.rules` to allow the directories Claude should access.
 
-### 2. iCloud app-specific password
+### 2. iCloud setup
 
 iCloud Calendar and Mail require an app-specific password:
 
@@ -45,7 +45,48 @@ security add-generic-password -s "freestone-icloud-mail" -a "your@apple-id.com" 
 
 The `-s` value must match `secret_ref` in your `config.toml`.
 
-### 3. Configure Claude Code
+### 3. Google setup
+
+Google Calendar and Gmail use OAuth2. You need a Google Cloud project with the Calendar and Gmail APIs enabled.
+
+#### Create OAuth credentials
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) > APIs & Services > Credentials
+2. Create an **OAuth 2.0 Client ID** of type **Desktop app**
+3. Note the Client ID and Client Secret
+4. Under **Authorized redirect URIs**, add `http://127.0.0.1` (the auth flow uses a random port on loopback)
+5. Enable the **Google Calendar API** and **Gmail API** for your project
+
+#### Store credentials in Keychain
+
+```bash
+security add-generic-password -s "freestone-google-client-id" -a "freestone" -w "YOUR_CLIENT_ID.apps.googleusercontent.com"
+security add-generic-password -s "freestone-google-client-secret" -a "freestone" -w "YOUR_CLIENT_SECRET"
+```
+
+The `-s` values must match `client_id_ref` and `client_secret_ref` in your `config.toml`.
+
+#### Authorize
+
+Run the auth flow to get a refresh token:
+
+```bash
+freestone-mcp auth google
+```
+
+This opens your browser for Google consent. Phase 1B requests read-only scopes:
+- `https://www.googleapis.com/auth/calendar.readonly`
+- `https://www.googleapis.com/auth/gmail.readonly`
+
+The refresh token is stored in Keychain under the `token_ref` from your config (default: `freestone-google-token`).
+
+To revoke access and delete the stored token:
+
+```bash
+freestone-mcp auth google --revoke
+```
+
+### 4. Configure Claude Code
 
 Add freestone to your Claude Code MCP configuration (`~/.config/claude/mcp.json`):
 
@@ -60,9 +101,9 @@ Add freestone to your Claude Code MCP configuration (`~/.config/claude/mcp.json`
 }
 ```
 
-## Tools (Phase 1A)
+## Tools (Phase 1B)
 
-All tools are read-only in Phase 1A.
+All tools are read-only. The `provider` parameter selects which backend to use (`icloud` or `google`). Omit it on list operations to aggregate results from all enabled providers.
 
 ### Calendar
 
@@ -76,7 +117,7 @@ All tools are read-only in Phase 1A.
 
 | Tool | Description |
 |------|-------------|
-| `mail_list_mailboxes` | List mailboxes/folders. Omit `provider` to list all. |
+| `mail_list_mailboxes` | List mailboxes/folders/labels. Omit `provider` to list all. |
 | `mail_list_messages` | List messages with optional filters (`since`, `before`, `unseen`, `from`, `subject`, `limit`). |
 | `mail_get_message` | Get full message content including body text and HTML. |
 
@@ -104,18 +145,23 @@ The `access.rules` file controls which paths Claude can access. See `example.acc
 cmd/freestone-mcp          Entry point, wiring, auth subcommand
 internal/mcpsrv            MCP adapter layer (thin: MCP <-> domain)
 internal/calendar           Domain types, Provider interface, Registry
+  providers/icloud          CalDAV driver with RRULE expansion
+  providers/google          Google Calendar API v3 driver
 internal/mail              Domain types, Provider interface, Registry
+  providers/icloud          IMAP driver
+  providers/google          Gmail API v1 driver
 internal/files             Sandboxed filesystem with rules evaluator
 internal/config            TOML config loader with validation
 internal/secrets           Keychain + env-var secret resolver
+internal/gauth             Google OAuth2 helper (flow, token persistence)
 internal/logger            Multi-handler slog (JSON file + text stderr)
 ```
 
 ## Known Limitations
 
-- iCloud only (Google providers planned for Phase 1B)
 - Read-only (writes planned for Phase 2)
 - No SMTP send — drafts only (Phase 2)
 - One account per provider
 - No connection pooling for IMAP (new connection per operation)
 - macOS only (Keychain dependency)
+- Google OAuth token stored as JSON in Keychain; if refresh token rotation fails, re-run `freestone-mcp auth google`
