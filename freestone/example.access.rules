@@ -1,0 +1,26 @@
+# freestone file access rules
+#
+# Each line is either:
+#   + /absolute/path   — allow access to this path and everything below it
+#   - /absolute/path   — deny access to this path and everything below it
+#
+# Rules are evaluated in order. The LAST matching rule wins.
+# If no rule matches, access is DENIED (default deny).
+#
+# Paths must be absolute. Use path-component matching, not string prefix:
+#   + /Users/kai         matches /Users/kai/file.txt
+#   + /Users/kai         does NOT match /Users/kaizen/file.txt
+#
+# Examples:
+#
+# Allow access to your Documents folder:
+# + /Users/YOU/Documents
+#
+# But deny access to a private subfolder:
+# - /Users/YOU/Documents/private
+#
+# Allow access to a project directory:
+# + /Users/YOU/projects/my-project
+#
+# Allow reading from /tmp:
+# + /tmp

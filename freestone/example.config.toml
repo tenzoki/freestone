@@ -1,0 +1,70 @@
+# freestone MCP server configuration
+#
+# Copy this file to ~/.config/freestone/config.toml and uncomment the sections
+# for the providers you want to enable. At least one provider or [files] must
+# be enabled.
+
+[server]
+# Path to the JSON log file. Leave empty for stderr-only logging.
+log_file = ""
+# audit_file = "/path/to/audit.jsonl"   # Phase 2
+
+# ---------------------------------------------------------------------------
+# Calendar providers
+# ---------------------------------------------------------------------------
+
+# --- iCloud Calendar (CalDAV) ---
+# Requires an app-specific password stored in macOS Keychain.
+# Generate one at https://appleid.apple.com → Sign-In and Security → App-Specific Passwords
+# Then store it:
+#   security add-generic-password -s "freestone-icloud-calendar" -a "YOUR_APPLE_ID" -w "APP_SPECIFIC_PASSWORD"
+
+# [calendar.icloud]
+# endpoint   = "https://caldav.icloud.com"
+# username   = "your@apple-id.com"
+# secret_ref = "freestone-icloud-calendar"
+
+# --- Google Calendar (API v3) ---
+# Requires OAuth2 credentials. Run `freestone-mcp auth google` after configuration.
+# See README.md for Google Cloud Console setup.
+
+# [calendar.google]
+# client_id_ref     = "freestone-google-client-id"
+# client_secret_ref = "freestone-google-client-secret"
+# token_ref         = "freestone-google-token"
+# user_email        = "your@gmail.com"
+
+# ---------------------------------------------------------------------------
+# Mail providers
+# ---------------------------------------------------------------------------
+
+# --- iCloud Mail (IMAP) ---
+# Uses the same app-specific password mechanism as iCloud Calendar.
+# You can reuse the same password or generate a separate one.
+
+# [mail.icloud]
+# host           = "imap.mail.me.com"
+# port           = 993
+# username       = "your@apple-id.com"
+# secret_ref     = "freestone-icloud-mail"
+# drafts_mailbox = "Drafts"
+
+# --- Gmail (API v1) ---
+# Shares OAuth2 credentials with Google Calendar if both are enabled.
+
+# [mail.google]
+# client_id_ref     = "freestone-google-client-id"
+# client_secret_ref = "freestone-google-client-secret"
+# token_ref         = "freestone-google-token"
+# user_email        = "your@gmail.com"
+
+# ---------------------------------------------------------------------------
+# File access
+# ---------------------------------------------------------------------------
+
+# Sandboxed local filesystem access governed by an access rules file.
+# See example.access.rules for the rules syntax.
+
+# [files]
+# rules_file     = "/Users/YOU/.config/freestone/access.rules"
+# max_read_bytes = 5242880   # 5 MiB (default)

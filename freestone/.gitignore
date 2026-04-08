@@ -1,0 +1,24 @@
+# Binary
+freestone-mcp
+dist/
+
+# Config (user-private)
+config.toml
+.config.toml
+access.rules
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Test artifacts
+coverage.out
