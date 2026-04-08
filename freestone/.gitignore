@@ -1,5 +1,5 @@
-# Binary
-freestone-mcp
+# Binary (the compiled binary at repo root, not cmd/freestone-mcp/ source dir)
+/freestone-mcp
 dist/
 
 # Config (user-private)
