@@ -57,7 +57,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 			Name:        "mail_list_mailboxes",
 			Description: "List mailboxes/folders. Omit provider to list from all enabled providers.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input listMailboxesInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "mail_list_mailboxes", func(ctx context.Context, _ *mcp.CallToolRequest, input listMailboxesInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			if input.Provider == "" {
@@ -76,7 +76,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(mboxes), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -84,7 +84,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 			Name:        "mail_list_messages",
 			Description: "List messages in a mailbox with optional filters.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input listMessagesInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "mail_list_messages", func(ctx context.Context, _ *mcp.CallToolRequest, input listMessagesInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -115,7 +115,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(msgs), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -123,7 +123,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 			Name:        "mail_get_message",
 			Description: "Get full message content including body.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input getMessageInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "mail_get_message", func(ctx context.Context, _ *mcp.CallToolRequest, input getMessageInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -135,7 +135,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(msg), nil, nil
-		},
+		}),
 	)
 
 	// -- Phase 2 write tools --
@@ -145,7 +145,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 			Name:        "mail_save_draft_reply",
 			Description: "Save a draft reply. The draft is saved to the provider's Drafts folder — it is NOT sent.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input saveDraftReplyInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "mail_save_draft_reply", func(ctx context.Context, _ *mcp.CallToolRequest, input saveDraftReplyInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -165,14 +165,14 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 			}
 			draftID, err := p.SaveDraftReply(ctx, d)
 			auditLog(al, "mail_save_draft_reply", input.Provider, map[string]string{
-				"subject":       input.Subject,
+				"subject":        input.Subject,
 				"in_reply_to_id": input.InReplyToID,
 			}, err)
 			if err != nil {
 				return errResult(err), nil, nil
 			}
 			return jsonResult(map[string]string{"status": "saved", "draft_id": draftID}), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -180,7 +180,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 			Name:        "mail_mark_read",
 			Description: "Mark a message as read.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input markReadInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "mail_mark_read", func(ctx context.Context, _ *mcp.CallToolRequest, input markReadInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -196,6 +196,6 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(map[string]string{"status": "marked_read", "id": input.ID}), nil, nil
-		},
+		}),
 	)
 }

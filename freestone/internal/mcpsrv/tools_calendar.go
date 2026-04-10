@@ -68,7 +68,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			Name:        "calendar_list_calendars",
 			Description: "List calendars. Omit provider to list from all enabled providers.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input listCalendarsInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "calendar_list_calendars", func(ctx context.Context, _ *mcp.CallToolRequest, input listCalendarsInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			if input.Provider == "" {
@@ -87,7 +87,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(cals), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -95,7 +95,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			Name:        "calendar_list_events",
 			Description: "List events in a calendar within a time range.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input listEventsInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "calendar_list_events", func(ctx context.Context, _ *mcp.CallToolRequest, input listEventsInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -119,7 +119,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(events), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -127,7 +127,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			Name:        "calendar_get_event",
 			Description: "Get a single event by UID.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input getEventInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "calendar_get_event", func(ctx context.Context, _ *mcp.CallToolRequest, input getEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -139,7 +139,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(event), nil, nil
-		},
+		}),
 	)
 
 	// -- Phase 2 write tools --
@@ -149,7 +149,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			Name:        "calendar_create_event",
 			Description: "Create a new calendar event.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input createEventInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "calendar_create_event", func(ctx context.Context, _ *mcp.CallToolRequest, input createEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -181,7 +181,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(created), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -189,7 +189,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			Name:        "calendar_update_event",
 			Description: "Update an existing calendar event.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input updateEventInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "calendar_update_event", func(ctx context.Context, _ *mcp.CallToolRequest, input updateEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -227,7 +227,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(updated), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -235,7 +235,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			Name:        "calendar_delete_event",
 			Description: "Delete a calendar event.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input deleteEventInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "calendar_delete_event", func(ctx context.Context, _ *mcp.CallToolRequest, input deleteEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			p, err := reg.Provider(input.Provider)
@@ -251,7 +251,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			return jsonResult(map[string]string{"status": "deleted", "uid": input.UID}), nil, nil
-		},
+		}),
 	)
 }
 

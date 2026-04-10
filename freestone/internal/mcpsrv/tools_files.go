@@ -46,7 +46,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			Name:        "files_list_dir",
 			Description: "List directory contents. Only paths allowed by the access rules are shown.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input listDirInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "files_list_dir", func(ctx context.Context, _ *mcp.CallToolRequest, input listDirInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			entries, err := fs.ListDir(ctx, input.Path)
@@ -54,7 +54,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 				return errResult(err), nil, nil
 			}
 			return jsonResult(entries), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -62,7 +62,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			Name:        "files_read_file",
 			Description: "Read file contents. Returns text or base64 depending on content.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input readFileInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "files_read_file", func(ctx context.Context, _ *mcp.CallToolRequest, input readFileInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			data, err := fs.ReadFile(ctx, input.Path, input.MaxBytes)
@@ -82,7 +82,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 					&mcp.TextContent{Text: base64.StdEncoding.EncodeToString(data)},
 				},
 			}, nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -90,7 +90,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			Name:        "files_stat",
 			Description: "Get file or directory metadata.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input statInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "files_stat", func(ctx context.Context, _ *mcp.CallToolRequest, input statInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			entry, err := fs.Stat(ctx, input.Path)
@@ -98,7 +98,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 				return errResult(err), nil, nil
 			}
 			return jsonResult(entry), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -106,7 +106,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			Name:        "files_glob",
 			Description: "Find files matching a glob pattern. Only allowed paths are returned.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input globInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "files_glob", func(ctx context.Context, _ *mcp.CallToolRequest, input globInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			matches, err := fs.Glob(ctx, input.Pattern)
@@ -114,7 +114,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 				return errResult(err), nil, nil
 			}
 			return jsonResult(matches), nil, nil
-		},
+		}),
 	)
 
 	// -- Phase 2 write tools --
@@ -124,7 +124,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			Name:        "files_write_file",
 			Description: "Write text content to a file. Only paths allowed by access rules are writable.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input writeFileInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "files_write_file", func(ctx context.Context, _ *mcp.CallToolRequest, input writeFileInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			err := fs.WriteFile(ctx, input.Path, []byte(input.Content), input.Overwrite)
@@ -137,7 +137,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 				return errResult(err), nil, nil
 			}
 			return jsonResult(map[string]string{"status": "written", "path": input.Path}), nil, nil
-		},
+		}),
 	)
 
 	mcp.AddTool(srv,
@@ -145,7 +145,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			Name:        "files_make_dir",
 			Description: "Create a directory (and any missing parents). Only allowed paths are accepted.",
 		},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input makeDirInput) (*mcp.CallToolResult, any, error) {
+		withLog(log, "files_make_dir", func(ctx context.Context, _ *mcp.CallToolRequest, input makeDirInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			err := fs.MakeDir(ctx, input.Path)
@@ -156,7 +156,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 				return errResult(err), nil, nil
 			}
 			return jsonResult(map[string]string{"status": "created", "path": input.Path}), nil, nil
-		},
+		}),
 	)
 }
 
