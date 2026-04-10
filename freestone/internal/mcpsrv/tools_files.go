@@ -161,14 +161,17 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 }
 
 // isTextContent returns true if data is valid UTF-8 with no NUL bytes.
+// Single-pass: decodes runes while checking for NUL.
 func isTextContent(data []byte) bool {
-	if !utf8.Valid(data) {
-		return false
-	}
-	for _, b := range data {
-		if b == 0 {
+	for i := 0; i < len(data); {
+		if data[i] == 0 {
 			return false
 		}
+		r, size := utf8.DecodeRune(data[i:])
+		if r == utf8.RuneError && size <= 1 {
+			return false
+		}
+		i += size
 	}
 	return true
 }

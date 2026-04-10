@@ -2,6 +2,7 @@ package google
 
 import (
 	"encoding/base64"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -120,11 +121,21 @@ func decodeBase64URL(s string) string {
 	return string(data)
 }
 
-// splitAddresses splits a comma-separated address list.
+// splitAddresses parses an RFC 5322 address list header value.
+// Falls back to naive comma-split if parsing fails (e.g. malformed headers).
 func splitAddresses(s string) []string {
 	if s == "" {
 		return nil
 	}
+	parsed, err := mail.ParseAddressList(s)
+	if err == nil {
+		addrs := make([]string, len(parsed))
+		for i, a := range parsed {
+			addrs[i] = a.String()
+		}
+		return addrs
+	}
+	// Fallback: naive split for headers that net/mail cannot parse.
 	parts := strings.Split(s, ",")
 	addrs := make([]string, 0, len(parts))
 	for _, p := range parts {
