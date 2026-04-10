@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kai/freestone/internal/audit"
 	"github.com/kai/freestone/internal/calendar"
 	"github.com/kai/freestone/internal/files"
 	"github.com/kai/freestone/internal/mail"
@@ -30,6 +31,7 @@ type Deps struct {
 	Calendar *calendar.Registry
 	Mail     *mail.Registry
 	Files    files.FileService
+	Audit    *audit.Logger // nil = no audit logging
 	Log      *slog.Logger
 }
 
@@ -44,13 +46,13 @@ func Build(deps Deps) *mcp.Server {
 	)
 
 	if deps.Calendar != nil {
-		registerCalendarTools(srv, deps.Calendar, deps.Log)
+		registerCalendarTools(srv, deps.Calendar, deps.Audit, deps.Log)
 	}
 	if deps.Mail != nil {
-		registerMailTools(srv, deps.Mail, deps.Log)
+		registerMailTools(srv, deps.Mail, deps.Audit, deps.Log)
 	}
 	if deps.Files != nil {
-		registerFileTools(srv, deps.Files, deps.Log)
+		registerFileTools(srv, deps.Files, deps.Audit, deps.Log)
 	}
 
 	return srv

@@ -8,6 +8,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kai/freestone/internal/audit"
 	"github.com/kai/freestone/internal/mail"
 )
 
@@ -32,7 +33,25 @@ type getMessageInput struct {
 	ID        string `json:"id" jsonschema:"Message ID"`
 }
 
-func registerMailTools(srv *mcp.Server, reg *mail.Registry, log *slog.Logger) {
+type saveDraftReplyInput struct {
+	Provider           string   `json:"provider" jsonschema:"Provider name (icloud or google)"`
+	InReplyToMailboxID string   `json:"in_reply_to_mailbox_id,omitempty" jsonschema:"Mailbox containing the original message"`
+	InReplyToID        string   `json:"in_reply_to_id,omitempty" jsonschema:"ID of message being replied to"`
+	Subject            string   `json:"subject" jsonschema:"Draft subject"`
+	BodyText           string   `json:"body_text" jsonschema:"Plain text body"`
+	BodyHTML           string   `json:"body_html,omitempty" jsonschema:"HTML body (optional)"`
+	To                 []string `json:"to" jsonschema:"Recipient email addresses"`
+	Cc                 []string `json:"cc,omitempty" jsonschema:"CC addresses"`
+	Bcc                []string `json:"bcc,omitempty" jsonschema:"BCC addresses"`
+}
+
+type markReadInput struct {
+	Provider  string `json:"provider" jsonschema:"Provider name (icloud or google)"`
+	MailboxID string `json:"mailbox_id,omitempty" jsonschema:"Mailbox ID (iCloud only)"`
+	ID        string `json:"id" jsonschema:"Message ID"`
+}
+
+func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, log *slog.Logger) {
 	mcp.AddTool(srv,
 		&mcp.Tool{
 			Name:        "mail_list_mailboxes",
@@ -116,6 +135,67 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, log *slog.Logger) {
 				return errResult(err), nil, nil
 			}
 			return jsonResult(msg), nil, nil
+		},
+	)
+
+	// -- Phase 2 write tools --
+
+	mcp.AddTool(srv,
+		&mcp.Tool{
+			Name:        "mail_save_draft_reply",
+			Description: "Save a draft reply. The draft is saved to the provider's Drafts folder — it is NOT sent.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input saveDraftReplyInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
+			p, err := reg.Provider(input.Provider)
+			if err != nil {
+				return errResult(err), nil, nil
+			}
+			d := mail.DraftReply{
+				Provider:           input.Provider,
+				InReplyToMailboxID: input.InReplyToMailboxID,
+				InReplyToID:        input.InReplyToID,
+				Subject:            input.Subject,
+				BodyText:           input.BodyText,
+				BodyHTML:           input.BodyHTML,
+				To:                 input.To,
+				Cc:                 input.Cc,
+				Bcc:                input.Bcc,
+			}
+			draftID, err := p.SaveDraftReply(ctx, d)
+			auditLog(al, "mail_save_draft_reply", input.Provider, map[string]string{
+				"subject":       input.Subject,
+				"in_reply_to_id": input.InReplyToID,
+			}, err)
+			if err != nil {
+				return errResult(err), nil, nil
+			}
+			return jsonResult(map[string]string{"status": "saved", "draft_id": draftID}), nil, nil
+		},
+	)
+
+	mcp.AddTool(srv,
+		&mcp.Tool{
+			Name:        "mail_mark_read",
+			Description: "Mark a message as read.",
+		},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input markReadInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
+			p, err := reg.Provider(input.Provider)
+			if err != nil {
+				return errResult(err), nil, nil
+			}
+			err = p.MarkRead(ctx, input.MailboxID, input.ID)
+			auditLog(al, "mail_mark_read", input.Provider, map[string]string{
+				"mailbox_id": input.MailboxID,
+				"id":         input.ID,
+			}, err)
+			if err != nil {
+				return errResult(err), nil, nil
+			}
+			return jsonResult(map[string]string{"status": "marked_read", "id": input.ID}), nil, nil
 		},
 	)
 }
