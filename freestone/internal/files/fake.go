@@ -124,12 +124,21 @@ func (f *FakeFS) Glob(_ context.Context, pattern string) ([]string, error) {
 	return matches, nil
 }
 
-func (f *FakeFS) WriteFile(_ context.Context, _ string, _ []byte, _ bool) error {
-	return fmt.Errorf("fake: write not implemented in phase 1")
+func (f *FakeFS) WriteFile(_ context.Context, path string, data []byte, overwrite bool) error {
+	path = filepath.Clean(path)
+	if _, exists := f.Files[path]; exists && !overwrite {
+		return fmt.Errorf("fake: %s already exists (set overwrite=true to replace)", path)
+	}
+	f.Files[path] = data
+	f.Times[path] = time.Now()
+	return nil
 }
 
-func (f *FakeFS) MakeDir(_ context.Context, _ string) error {
-	return fmt.Errorf("fake: mkdir not implemented in phase 1")
+func (f *FakeFS) MakeDir(_ context.Context, path string) error {
+	path = filepath.Clean(path)
+	f.Dirs[path] = true
+	f.Times[path] = time.Now()
+	return nil
 }
 
 func (f *FakeFS) modTime(path string) time.Time {

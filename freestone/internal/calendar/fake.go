@@ -46,16 +46,37 @@ func (f *Fake) GetEvent(_ context.Context, calendarID, uid string) (*Event, erro
 	return nil, fmt.Errorf("fake: event %s not found in %s", uid, calendarID)
 }
 
-func (f *Fake) CreateEvent(_ context.Context, _ string, _ Event) (*Event, error) {
-	return nil, fmt.Errorf("fake: create not implemented in phase 1")
+func (f *Fake) CreateEvent(_ context.Context, calendarID string, e Event) (*Event, error) {
+	e.Provider = f.ProviderName
+	e.CalendarID = calendarID
+	if e.UID == "" {
+		e.UID = fmt.Sprintf("fake-%d", len(f.Events[calendarID])+1)
+	}
+	f.Events[calendarID] = append(f.Events[calendarID], e)
+	return &e, nil
 }
 
-func (f *Fake) UpdateEvent(_ context.Context, _ Event) (*Event, error) {
-	return nil, fmt.Errorf("fake: update not implemented in phase 1")
+func (f *Fake) UpdateEvent(_ context.Context, e Event) (*Event, error) {
+	events := f.Events[e.CalendarID]
+	for i, existing := range events {
+		if existing.UID == e.UID {
+			e.Provider = f.ProviderName
+			f.Events[e.CalendarID][i] = e
+			return &e, nil
+		}
+	}
+	return nil, fmt.Errorf("fake: event %s not found", e.UID)
 }
 
-func (f *Fake) DeleteEvent(_ context.Context, _, _, _ string) error {
-	return fmt.Errorf("fake: delete not implemented in phase 1")
+func (f *Fake) DeleteEvent(_ context.Context, calendarID, uid, _ string) error {
+	events := f.Events[calendarID]
+	for i, e := range events {
+		if e.UID == uid {
+			f.Events[calendarID] = append(events[:i], events[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("fake: event %s not found", uid)
 }
 
 // NewFakeRegistry creates a Registry populated with the given fakes.

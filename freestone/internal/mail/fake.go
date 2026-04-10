@@ -11,6 +11,8 @@ type Fake struct {
 	Mailboxes    []Mailbox
 	Messages     map[string][]MessageSummary // keyed by mailbox ID
 	FullMessages map[string]*Message         // keyed by message ID
+	Drafts       map[string]DraftReply       // keyed by draft ID (Phase 2)
+	draftSeq     int
 }
 
 func (f *Fake) Name() string { return f.ProviderName }
@@ -55,12 +57,27 @@ func (f *Fake) GetMessage(_ context.Context, _, id string) (*Message, error) {
 	return msg, nil
 }
 
-func (f *Fake) SaveDraftReply(_ context.Context, _ DraftReply) (string, error) {
-	return "", fmt.Errorf("fake: save draft not implemented in phase 1")
+func (f *Fake) SaveDraftReply(_ context.Context, d DraftReply) (string, error) {
+	id := fmt.Sprintf("draft-%d", f.draftSeq+1)
+	f.draftSeq++
+	if f.Drafts == nil {
+		f.Drafts = make(map[string]DraftReply)
+	}
+	f.Drafts[id] = d
+	return id, nil
 }
 
-func (f *Fake) MarkRead(_ context.Context, _, _ string) error {
-	return fmt.Errorf("fake: mark read not implemented in phase 1")
+func (f *Fake) MarkRead(_ context.Context, mailboxID, id string) error {
+	msgs := f.Messages[mailboxID]
+	for i, m := range msgs {
+		if m.ID == id {
+			if !containsFlag(m.Flags, `\Seen`) {
+				f.Messages[mailboxID][i].Flags = append(m.Flags, `\Seen`)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("fake: message %s not found in %s", id, mailboxID)
 }
 
 func containsFlag(flags []string, target string) bool {

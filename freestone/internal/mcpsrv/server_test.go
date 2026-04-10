@@ -100,13 +100,20 @@ func TestListTools(t *testing.T) {
 		"calendar_list_calendars",
 		"calendar_list_events",
 		"calendar_get_event",
+		"calendar_create_event",
+		"calendar_update_event",
+		"calendar_delete_event",
 		"mail_list_mailboxes",
 		"mail_list_messages",
 		"mail_get_message",
+		"mail_save_draft_reply",
+		"mail_mark_read",
 		"files_list_dir",
 		"files_read_file",
 		"files_stat",
 		"files_glob",
+		"files_write_file",
+		"files_make_dir",
 	}
 
 	toolNames := make(map[string]bool)
@@ -625,6 +632,192 @@ func TestUnknownProvider(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("expected error for unknown provider")
+	}
+}
+
+// -- Phase 2 write tool tests --
+
+func TestCalendarCreateEvent(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "calendar_create_event",
+		Arguments: map[string]any{
+			"provider":    "icloud",
+			"calendar_id": "/cal/personal/",
+			"summary":     "New Meeting",
+			"start":       "2026-04-10T09:00:00Z",
+			"end":         "2026-04-10T10:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "New Meeting") {
+		t.Errorf("expected 'New Meeting' in result, got: %s", text)
+	}
+}
+
+func TestCalendarUpdateEvent(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "calendar_update_event",
+		Arguments: map[string]any{
+			"provider":    "icloud",
+			"calendar_id": "/cal/personal/",
+			"uid":         "evt-1",
+			"summary":     "Updated Event",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "Updated Event") {
+		t.Errorf("expected 'Updated Event', got: %s", text)
+	}
+}
+
+func TestCalendarDeleteEvent(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "calendar_delete_event",
+		Arguments: map[string]any{
+			"provider":    "icloud",
+			"calendar_id": "/cal/personal/",
+			"uid":         "evt-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "deleted") {
+		t.Errorf("expected 'deleted' in result, got: %s", text)
+	}
+}
+
+func TestMailSaveDraftReply(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "mail_save_draft_reply",
+		Arguments: map[string]any{
+			"provider":  "icloud",
+			"subject":   "Re: Hello",
+			"body_text": "Thanks for your message.",
+			"to":        []any{"alice@test.com"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "saved") {
+		t.Errorf("expected 'saved' in result, got: %s", text)
+	}
+	if !strings.Contains(text, "draft_id") {
+		t.Errorf("expected 'draft_id' in result, got: %s", text)
+	}
+}
+
+func TestMailMarkRead(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "mail_mark_read",
+		Arguments: map[string]any{
+			"provider":   "icloud",
+			"mailbox_id": "INBOX",
+			"id":         "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "marked_read") {
+		t.Errorf("expected 'marked_read', got: %s", text)
+	}
+}
+
+func TestFilesWriteFile(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "files_write_file",
+		Arguments: map[string]any{
+			"path":    "/tmp/test/new-file.txt",
+			"content": "hello world",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "written") {
+		t.Errorf("expected 'written', got: %s", text)
+	}
+}
+
+func TestFilesWriteFileNoOverwrite(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	// File already exists in the fake.
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "files_write_file",
+		Arguments: map[string]any{
+			"path":    "/tmp/test/readme.txt",
+			"content": "overwrite attempt",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when overwriting without flag")
+	}
+}
+
+func TestFilesMakeDir(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "files_make_dir",
+		Arguments: map[string]any{
+			"path": "/tmp/test/subdir",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "created") {
+		t.Errorf("expected 'created', got: %s", text)
 	}
 }
 
