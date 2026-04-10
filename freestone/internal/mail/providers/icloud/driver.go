@@ -254,10 +254,10 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Me
 	}
 
 	fetchCmd := c.Fetch(uidSet, fetchOptions)
-	defer fetchCmd.Close()
 
 	msgData := fetchCmd.Next()
 	if msgData == nil {
+		fetchCmd.Close()
 		return nil, fmt.Errorf("icloud-mail: message %s not found", id)
 	}
 
