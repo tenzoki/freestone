@@ -24,8 +24,9 @@ func SaveToken(ref string, tok *oauth2.Token) error {
 		"-a", "freestone", // account
 		"-w", string(data), // password (the JSON blob)
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("gauth: save token to keychain %q: %s: %w", ref, string(out), err)
+	cmd.Stderr = nil // suppress stderr to avoid leaking keychain metadata
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gauth: save token to keychain %q: %w", ref, err)
 	}
 	return nil
 }
@@ -37,8 +38,9 @@ func DeleteToken(ref string) error {
 		"-s", ref,
 		"-a", "freestone",
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("gauth: delete token from keychain %q: %s: %w", ref, string(out), err)
+	cmd.Stderr = nil // suppress stderr to avoid leaking keychain metadata
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gauth: delete token from keychain %q: %w", ref, err)
 	}
 	return nil
 }
