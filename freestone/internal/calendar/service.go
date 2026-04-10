@@ -5,6 +5,8 @@ package calendar
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -89,26 +91,36 @@ func (r *Registry) Provider(name string) (Provider, error) {
 }
 
 // ListAllCalendars aggregates calendars from every registered provider.
+// If some providers fail, partial results from successful providers are
+// still returned. Errors are collected and returned as a single joined error.
 func (r *Registry) ListAllCalendars(ctx context.Context) ([]Calendar, error) {
 	var all []Calendar
-	for _, p := range r.providers {
+	var errs []string
+	for _, name := range r.ProviderNames() {
+		p := r.providers[name]
 		cals, err := p.ListCalendars(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("calendar: %s: %w", p.Name(), err)
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			continue
 		}
 		for i := range cals {
-			cals[i].Provider = p.Name()
+			cals[i].Provider = name
 		}
 		all = append(all, cals...)
 	}
+	if len(errs) > 0 && len(all) == 0 {
+		return nil, fmt.Errorf("calendar: all providers failed: %s", strings.Join(errs, "; "))
+	}
+	// Partial success: return results even if some providers failed.
 	return all, nil
 }
 
-// ProviderNames returns the names of all registered providers.
+// ProviderNames returns the names of all registered providers in sorted order.
 func (r *Registry) ProviderNames() []string {
 	names := make([]string, 0, len(r.providers))
 	for name := range r.providers {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
