@@ -104,6 +104,39 @@ func eventFromGoogle(item *calendar.Event) (domain.Event, error) {
 	return ev, nil
 }
 
+// domainToGoogle converts a domain Event to a Google Calendar Event for write
+// operations (create/update).
+func domainToGoogle(e domain.Event) *calendar.Event {
+	ge := &calendar.Event{
+		Summary:     e.Summary,
+		Description: e.Description,
+		Location:    e.Location,
+	}
+
+	if e.AllDay {
+		ge.Start = &calendar.EventDateTime{Date: e.StartUTC.Format("2006-01-02")}
+		ge.End = &calendar.EventDateTime{Date: e.EndUTC.Format("2006-01-02")}
+	} else {
+		ge.Start = &calendar.EventDateTime{
+			DateTime: e.StartUTC.UTC().Format(time.RFC3339),
+			TimeZone: e.TZID,
+		}
+		ge.End = &calendar.EventDateTime{
+			DateTime: e.EndUTC.UTC().Format(time.RFC3339),
+			TimeZone: e.TZID,
+		}
+	}
+
+	if e.Organizer != "" {
+		ge.Organizer = &calendar.EventOrganizer{Email: e.Organizer}
+	}
+	for _, a := range e.Attendees {
+		ge.Attendees = append(ge.Attendees, &calendar.EventAttendee{Email: a})
+	}
+
+	return ge
+}
+
 // parseDateTimeField parses an RFC3339 dateTime string and an optional IANA
 // timezone. Returns the UTC time, the local RFC3339 representation, and the
 // TZID.

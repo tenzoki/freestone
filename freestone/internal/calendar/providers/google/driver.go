@@ -95,16 +95,51 @@ func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*domain.
 	return &ev, nil
 }
 
-// -- Phase 2 write stubs --
-
-func (d *Driver) CreateEvent(_ context.Context, _ string, _ domain.Event) (*domain.Event, error) {
-	return nil, fmt.Errorf("google calendar: create not implemented (phase 2)")
+// CreateEvent inserts a new event into the given calendar.
+func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e domain.Event) (*domain.Event, error) {
+	ge := domainToGoogle(e)
+	created, err := d.svc.Events.Insert(calendarID, ge).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("google calendar: create event: %w", err)
+	}
+	result, err := eventFromGoogle(created)
+	if err != nil {
+		return nil, err
+	}
+	result.CalendarID = calendarID
+	return &result, nil
 }
 
-func (d *Driver) UpdateEvent(_ context.Context, _ domain.Event) (*domain.Event, error) {
-	return nil, fmt.Errorf("google calendar: update not implemented (phase 2)")
+// UpdateEvent updates an existing event. The event's UID and CalendarID
+// must be set. Google Calendar does not use ETags for conflict detection
+// via this client, so the etag field in the domain Event is accepted but
+// not enforced.
+func (d *Driver) UpdateEvent(ctx context.Context, e domain.Event) (*domain.Event, error) {
+	if e.CalendarID == "" {
+		return nil, fmt.Errorf("google calendar: update requires calendar_id")
+	}
+	if e.UID == "" {
+		return nil, fmt.Errorf("google calendar: update requires uid")
+	}
+	ge := domainToGoogle(e)
+	updated, err := d.svc.Events.Update(e.CalendarID, e.UID, ge).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("google calendar: update event %s: %w", e.UID, err)
+	}
+	result, err := eventFromGoogle(updated)
+	if err != nil {
+		return nil, err
+	}
+	result.CalendarID = e.CalendarID
+	return &result, nil
 }
 
-func (d *Driver) DeleteEvent(_ context.Context, _, _, _ string) error {
-	return fmt.Errorf("google calendar: delete not implemented (phase 2)")
+// DeleteEvent removes an event from the given calendar.
+// The etag parameter is accepted for interface compatibility but is not
+// used by the Google Calendar API client.
+func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, _ string) error {
+	if err := d.svc.Events.Delete(calendarID, uid).Context(ctx).Do(); err != nil {
+		return fmt.Errorf("google calendar: delete event %s: %w", uid, err)
+	}
+	return nil
 }
