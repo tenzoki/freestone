@@ -4,7 +4,7 @@ A personal MCP server that extends Claude Code with calendar, mail, and file acc
 
 ## Status
 
-**Phase 1B** — Read-only MVP with iCloud and Google providers.
+**Phase 2** — Read/write with iCloud and Google providers. All write operations are audited.
 
 ## Install
 
@@ -74,9 +74,9 @@ Run the auth flow to get a refresh token:
 freestone-mcp auth google
 ```
 
-This opens your browser for Google consent. Phase 1B requests read-only scopes:
-- `https://www.googleapis.com/auth/calendar.readonly`
-- `https://www.googleapis.com/auth/gmail.readonly`
+This opens your browser for Google consent. Phase 2 requests read/write scopes:
+- `https://www.googleapis.com/auth/calendar` (read + create/update/delete events)
+- `https://www.googleapis.com/auth/gmail.modify` (read + draft save + mark read)
 
 The refresh token is stored in Keychain under the `token_ref` from your config (default: `freestone-google-token`).
 
@@ -101,9 +101,9 @@ Add freestone to your Claude Code MCP configuration (`~/.config/claude/mcp.json`
 }
 ```
 
-## Tools (Phase 1B)
+## Tools
 
-All tools are read-only. The `provider` parameter selects which backend to use (`icloud` or `google`). Omit it on list operations to aggregate results from all enabled providers.
+The `provider` parameter selects which backend to use (`icloud` or `google`). Omit it on list operations to aggregate results from all enabled providers. All write operations are recorded in the audit log.
 
 ### Calendar
 
@@ -112,6 +112,9 @@ All tools are read-only. The `provider` parameter selects which backend to use (
 | `calendar_list_calendars` | List calendars. Omit `provider` to list from all enabled providers. |
 | `calendar_list_events` | List events in a calendar within a time range (RFC3339 `start`/`end`). |
 | `calendar_get_event` | Get a single event by UID. |
+| `calendar_create_event` | Create a new event (summary, start, end, optional description/location). |
+| `calendar_update_event` | Update an existing event by UID. Supports partial updates. |
+| `calendar_delete_event` | Delete an event by UID. Supports ETag for conflict detection (iCloud). |
 
 ### Mail
 
@@ -120,6 +123,8 @@ All tools are read-only. The `provider` parameter selects which backend to use (
 | `mail_list_mailboxes` | List mailboxes/folders/labels. Omit `provider` to list all. |
 | `mail_list_messages` | List messages with optional filters (`since`, `before`, `unseen`, `from`, `subject`, `limit`). |
 | `mail_get_message` | Get full message content including body text and HTML. |
+| `mail_save_draft_reply` | Save a draft reply to the Drafts folder. **Does not send.** Supports In-Reply-To threading. |
+| `mail_mark_read` | Mark a message as read. |
 
 ### Files
 
@@ -129,6 +134,14 @@ All tools are read-only. The `provider` parameter selects which backend to use (
 | `files_read_file` | Read file contents. Returns text (UTF-8) or base64 (binary). |
 | `files_stat` | Get file or directory metadata. |
 | `files_glob` | Find files matching a glob pattern (only allowed paths returned). |
+| `files_write_file` | Write text content to a file. Requires explicit `overwrite` flag for existing files. |
+| `files_make_dir` | Create a directory (and missing parents). Only allowed paths accepted. |
+
+## Audit Log
+
+All write operations (calendar create/update/delete, mail draft save, mail mark read, file write, mkdir) are recorded in an append-only JSONL audit log at `~/.config/freestone/audit.jsonl`. Each entry records the tool name, provider, input parameters, outcome (ok/error), and timestamp.
+
+The audit log is best-effort — write failures do not block tool execution.
 
 ## File Access Rules
 
@@ -151,6 +164,7 @@ internal/mail              Domain types, Provider interface, Registry
   providers/icloud          IMAP driver
   providers/google          Gmail API v1 driver
 internal/files             Sandboxed filesystem with rules evaluator
+internal/audit             Append-only JSONL audit logger for write operations
 internal/config            TOML config loader with validation
 internal/secrets           Keychain + env-var secret resolver
 internal/gauth             Google OAuth2 helper (flow, token persistence)
@@ -159,9 +173,9 @@ internal/logger            Multi-handler slog (JSON file + text stderr)
 
 ## Known Limitations
 
-- Read-only (writes planned for Phase 2)
-- No SMTP send — drafts only (Phase 2)
+- No SMTP send — mail write support saves drafts only (by design, for safety)
 - One account per provider
 - No connection pooling for IMAP (new connection per operation)
 - macOS only (Keychain dependency)
+- iCloud CalDAV does not enforce ETag-based conflict detection (upstream library limitation)
 - Google OAuth token stored as JSON in Keychain; if refresh token rotation fails, re-run `freestone-mcp auth google`
