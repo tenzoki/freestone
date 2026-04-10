@@ -3,6 +3,7 @@ package google
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -118,14 +119,54 @@ func (d *Driver) GetMessage(ctx context.Context, _, id string) (*domain.Message,
 	return &msg, nil
 }
 
-// -- Phase 2 write stubs --
+// SaveDraftReply creates a Gmail draft as a reply to an existing message.
+// It fetches the original message's threadId for threading, encodes a
+// minimal RFC 5322 message, and calls Drafts.Create.
+func (d *Driver) SaveDraftReply(ctx context.Context, draft domain.DraftReply) (string, error) {
+	var threadID string
 
-func (d *Driver) SaveDraftReply(_ context.Context, _ domain.DraftReply) (string, error) {
-	return "", fmt.Errorf("gmail: save draft not implemented (phase 2)")
+	// Fetch the original message's ThreadId for proper threading.
+	if draft.InReplyToID != "" {
+		orig, err := d.svc.Users.Messages.Get("me", draft.InReplyToID).
+			Context(ctx).
+			Format("metadata").
+			MetadataHeaders("Message-ID").
+			Do()
+		if err != nil {
+			return "", fmt.Errorf("gmail: get original message %s: %w", draft.InReplyToID, err)
+		}
+		threadID = orig.ThreadId
+	}
+
+	body := buildRFC5322(draft)
+	raw := base64.URLEncoding.EncodeToString(body)
+
+	gmailMsg := &gmail.Message{Raw: raw}
+	if threadID != "" {
+		gmailMsg.ThreadId = threadID
+	}
+
+	created, err := d.svc.Users.Drafts.Create("me", &gmail.Draft{
+		Message: gmailMsg,
+	}).Context(ctx).Do()
+	if err != nil {
+		return "", fmt.Errorf("gmail: create draft: %w", err)
+	}
+	if created.Message != nil {
+		return created.Message.Id, nil
+	}
+	return created.Id, nil
 }
 
-func (d *Driver) MarkRead(_ context.Context, _, _ string) error {
-	return fmt.Errorf("gmail: mark read not implemented (phase 2)")
+// MarkRead removes the UNREAD label from a message.
+func (d *Driver) MarkRead(ctx context.Context, _, id string) error {
+	_, err := d.svc.Users.Messages.Modify("me", id, &gmail.ModifyMessageRequest{
+		RemoveLabelIds: []string{"UNREAD"},
+	}).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("gmail: mark read %s: %w", id, err)
+	}
+	return nil
 }
 
 // buildGmailQuery converts a MessageQuery to a Gmail search query string.

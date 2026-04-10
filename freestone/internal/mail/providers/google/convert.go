@@ -136,6 +136,29 @@ func splitAddresses(s string) []string {
 	return addrs
 }
 
+// buildRFC5322 creates a minimal RFC 5322 message from a DraftReply.
+func buildRFC5322(d domain.DraftReply) []byte {
+	var b strings.Builder
+	b.WriteString("To: " + strings.Join(d.To, ", ") + "\r\n")
+	if len(d.Cc) > 0 {
+		b.WriteString("Cc: " + strings.Join(d.Cc, ", ") + "\r\n")
+	}
+	if len(d.Bcc) > 0 {
+		b.WriteString("Bcc: " + strings.Join(d.Bcc, ", ") + "\r\n")
+	}
+	b.WriteString("Subject: " + d.Subject + "\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+	b.WriteString("\r\n")
+	body := d.BodyText
+	if body == "" {
+		body = d.BodyHTML
+	}
+	b.WriteString(body)
+	return []byte(b.String())
+}
+
 // parseDate attempts to parse common email date formats.
 func parseDate(s string) (time.Time, error) {
 	formats := []string{
