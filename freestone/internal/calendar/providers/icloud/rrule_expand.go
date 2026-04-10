@@ -47,16 +47,33 @@ func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windo
 		windowEnd = dtstart.AddDate(1, 0, 0)
 	}
 
-	instances := rule.Between(windowStart, windowEnd, true)
-	if len(instances) > maxExpansions {
-		instances = instances[:maxExpansions]
-	}
-
+	// Use an iterator instead of Between() to avoid pre-allocating a
+	// potentially huge slice for rules without COUNT or UNTIL.
+	next := rule.Iterator()
 	var events []calendar.Event
-	for _, inst := range instances {
+	count := 0
+
+	for {
+		inst, ok := next()
+		if !ok {
+			break
+		}
 		instUTC := inst.UTC()
+		// Skip instances before the query window.
+		if instUTC.Before(windowStart) {
+			continue
+		}
+		// Stop once we pass the query window.
+		if !instUTC.Before(windowEnd) {
+			break
+		}
 		if exdates[instUTC] {
 			continue
+		}
+
+		count++
+		if count > maxExpansions {
+			break
 		}
 
 		e := base
