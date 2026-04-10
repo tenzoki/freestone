@@ -146,14 +146,57 @@ func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*calenda
 	return &events[0], nil
 }
 
-func (d *Driver) CreateEvent(_ context.Context, _ string, _ calendar.Event) (*calendar.Event, error) {
-	return nil, fmt.Errorf("icloud-calendar: create not implemented in phase 1")
+func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e calendar.Event) (*calendar.Event, error) {
+	cal, uid, err := encodeEvent(e)
+	if err != nil {
+		return nil, fmt.Errorf("icloud-calendar: encode event: %w", err)
+	}
+
+	path := eventObjectPath(calendarID, uid)
+	obj, err := d.client.PutCalendarObject(ctx, path, cal)
+	if err != nil {
+		return nil, fmt.Errorf("icloud-calendar: create event: %w", err)
+	}
+
+	e.Provider = "icloud"
+	e.CalendarID = calendarID
+	e.UID = uid
+	if obj != nil {
+		e.ETag = obj.ETag
+	}
+	return &e, nil
 }
 
-func (d *Driver) UpdateEvent(_ context.Context, _ calendar.Event) (*calendar.Event, error) {
-	return nil, fmt.Errorf("icloud-calendar: update not implemented in phase 1")
+func (d *Driver) UpdateEvent(ctx context.Context, e calendar.Event) (*calendar.Event, error) {
+	if e.CalendarID == "" {
+		return nil, fmt.Errorf("icloud-calendar: update requires calendar_id")
+	}
+	if e.UID == "" {
+		return nil, fmt.Errorf("icloud-calendar: update requires uid")
+	}
+
+	cal, _, err := encodeEvent(e)
+	if err != nil {
+		return nil, fmt.Errorf("icloud-calendar: encode event: %w", err)
+	}
+
+	path := eventObjectPath(e.CalendarID, e.UID)
+	obj, err := d.client.PutCalendarObject(ctx, path, cal)
+	if err != nil {
+		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", e.UID, err)
+	}
+
+	e.Provider = "icloud"
+	if obj != nil {
+		e.ETag = obj.ETag
+	}
+	return &e, nil
 }
 
-func (d *Driver) DeleteEvent(_ context.Context, _, _, _ string) error {
-	return fmt.Errorf("icloud-calendar: delete not implemented in phase 1")
+func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, _ string) error {
+	path := eventObjectPath(calendarID, uid)
+	if err := d.client.RemoveAll(ctx, path); err != nil {
+		return fmt.Errorf("icloud-calendar: delete event %s: %w", uid, err)
+	}
+	return nil
 }
