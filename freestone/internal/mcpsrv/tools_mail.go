@@ -39,6 +39,8 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, log *slog.Logger) {
 			Description: "List mailboxes/folders. Omit provider to list from all enabled providers.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input listMailboxesInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			if input.Provider == "" {
 				mboxes, err := reg.ListAllMailboxes(ctx)
 				if err != nil {
@@ -64,6 +66,8 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, log *slog.Logger) {
 			Description: "List messages in a mailbox with optional filters.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input listMessagesInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			p, err := reg.Provider(input.Provider)
 			if err != nil {
 				return errResult(err), nil, nil
@@ -101,6 +105,8 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, log *slog.Logger) {
 			Description: "Get full message content including body.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input getMessageInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			p, err := reg.Provider(input.Provider)
 			if err != nil {
 				return errResult(err), nil, nil

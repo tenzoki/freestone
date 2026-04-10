@@ -35,6 +35,8 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, log *slog.Logger) 
 			Description: "List directory contents. Only paths allowed by the access rules are shown.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input listDirInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			entries, err := fs.ListDir(ctx, input.Path)
 			if err != nil {
 				return errResult(err), nil, nil
@@ -49,6 +51,8 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, log *slog.Logger) 
 			Description: "Read file contents. Returns text or base64 depending on content.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input readFileInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			data, err := fs.ReadFile(ctx, input.Path, input.MaxBytes)
 			if err != nil {
 				return errResult(err), nil, nil
@@ -75,6 +79,8 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, log *slog.Logger) 
 			Description: "Get file or directory metadata.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input statInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			entry, err := fs.Stat(ctx, input.Path)
 			if err != nil {
 				return errResult(err), nil, nil
@@ -89,6 +95,8 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, log *slog.Logger) 
 			Description: "Find files matching a glob pattern. Only allowed paths are returned.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input globInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			matches, err := fs.Glob(ctx, input.Pattern)
 			if err != nil {
 				return errResult(err), nil, nil

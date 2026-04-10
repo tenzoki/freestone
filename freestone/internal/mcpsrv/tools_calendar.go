@@ -38,6 +38,8 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, log *slog.Lo
 			Description: "List calendars. Omit provider to list from all enabled providers.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input listCalendarsInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			if input.Provider == "" {
 				cals, err := reg.ListAllCalendars(ctx)
 				if err != nil {
@@ -63,6 +65,8 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, log *slog.Lo
 			Description: "List events in a calendar within a time range.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input listEventsInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			p, err := reg.Provider(input.Provider)
 			if err != nil {
 				return errResult(err), nil, nil
@@ -93,6 +97,8 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, log *slog.Lo
 			Description: "Get a single event by UID.",
 		},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input getEventInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := withTimeout(ctx)
+			defer cancel()
 			p, err := reg.Provider(input.Provider)
 			if err != nil {
 				return errResult(err), nil, nil

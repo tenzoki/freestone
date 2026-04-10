@@ -3,7 +3,9 @@
 package mcpsrv
 
 import (
+	"context"
 	"log/slog"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -11,6 +13,16 @@ import (
 	"github.com/kai/freestone/internal/files"
 	"github.com/kai/freestone/internal/mail"
 )
+
+// toolTimeout is the maximum duration for a single tool call.
+// If the incoming context already has a shorter deadline, that wins.
+const toolTimeout = 30 * time.Second
+
+// withTimeout returns a context with toolTimeout applied. If the parent
+// already has a shorter deadline, the parent's deadline is preserved.
+func withTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, toolTimeout)
+}
 
 // Deps holds the domain services the MCP server depends on.
 // Nil fields mean that domain is not enabled.
