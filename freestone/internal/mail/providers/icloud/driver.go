@@ -302,12 +302,105 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Me
 	return msg, fetchCmd.Close()
 }
 
-func (d *Driver) SaveDraftReply(_ context.Context, _ mail.DraftReply) (string, error) {
-	return "", fmt.Errorf("icloud-mail: save draft not implemented in phase 1")
+func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (string, error) {
+	c, err := d.connect(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer c.Logout().Wait()
+
+	// If replying, fetch the original message's Message-ID for threading.
+	var inReplyToMsgID string
+	if draft.InReplyToID != "" {
+		mailboxID := draft.InReplyToMailboxID
+		if mailboxID == "" {
+			mailboxID = "INBOX"
+		}
+		if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
+			return "", fmt.Errorf("icloud-mail: select %s for reply: %w", mailboxID, err)
+		}
+		origUID, parseErr := strconv.ParseUint(draft.InReplyToID, 10, 32)
+		if parseErr == nil {
+			uidSet := imap.UIDSetNum(imap.UID(origUID))
+			fetchOpts := &imap.FetchOptions{Envelope: true}
+			fetchCmd := c.Fetch(uidSet, fetchOpts)
+			if msgData := fetchCmd.Next(); msgData != nil {
+				for {
+					item := msgData.Next()
+					if item == nil {
+						break
+					}
+					if envData, ok := item.(imapclient.FetchItemDataEnvelope); ok {
+						if envData.Envelope != nil {
+							inReplyToMsgID = envData.Envelope.MessageID
+						}
+					}
+				}
+			}
+			fetchCmd.Close()
+		}
+	}
+
+	body, err := encodeDraftReply(draft, inReplyToMsgID)
+	if err != nil {
+		return "", fmt.Errorf("icloud-mail: encode draft: %w", err)
+	}
+
+	appendCmd := c.Append(d.draftsMailbox, int64(len(body)), nil)
+	if _, err := appendCmd.Write(body); err != nil {
+		return "", fmt.Errorf("icloud-mail: append write: %w", err)
+	}
+	if err := appendCmd.Close(); err != nil {
+		return "", fmt.Errorf("icloud-mail: append close: %w", err)
+	}
+	data, err := appendCmd.Wait()
+	if err != nil {
+		return "", fmt.Errorf("icloud-mail: append: %w", err)
+	}
+
+	// Return the new UID if the server provides it (UIDPLUS extension).
+	if data != nil && data.UID != 0 {
+		return strconv.FormatUint(uint64(data.UID), 10), nil
+	}
+	return "", nil
 }
 
-func (d *Driver) MarkRead(_ context.Context, _, _ string) error {
-	return fmt.Errorf("icloud-mail: mark read not implemented in phase 1")
+func (d *Driver) MarkRead(ctx context.Context, mailboxID, id string) error {
+	c, err := d.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Logout().Wait()
+
+	if mailboxID == "" {
+		mailboxID = "INBOX"
+	}
+	if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
+		return fmt.Errorf("icloud-mail: select %s: %w", mailboxID, err)
+	}
+
+	uid, err := strconv.ParseUint(id, 10, 32)
+	if err != nil {
+		return fmt.Errorf("icloud-mail: invalid message ID %q: %w", id, err)
+	}
+
+	uidSet := imap.UIDSetNum(imap.UID(uid))
+	storeFlags := &imap.StoreFlags{
+		Op:     imap.StoreFlagsAdd,
+		Silent: true,
+		Flags:  []imap.Flag{imap.FlagSeen},
+	}
+	storeCmd := c.Store(uidSet, storeFlags, nil)
+	// Drain the command response.
+	for {
+		if storeCmd.Next() == nil {
+			break
+		}
+	}
+	if err := storeCmd.Close(); err != nil {
+		return fmt.Errorf("icloud-mail: mark read %s: %w", id, err)
+	}
+	return nil
 }
 
 func buildSearchCriteria(q mail.MessageQuery) *imap.SearchCriteria {
