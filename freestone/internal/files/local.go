@@ -151,10 +151,37 @@ func (fs *LocalFS) Glob(_ context.Context, pattern string) ([]string, error) {
 	return allowed, nil
 }
 
-func (fs *LocalFS) WriteFile(_ context.Context, _ string, _ []byte, _ bool) error {
-	return fmt.Errorf("files: write not implemented in phase 1")
+func (fs *LocalFS) WriteFile(_ context.Context, path string, data []byte, overwrite bool) error {
+	resolved, err := fs.checkAccess(path)
+	if err != nil {
+		return err
+	}
+
+	if !overwrite {
+		if _, statErr := os.Stat(resolved); statErr == nil {
+			return fmt.Errorf("files: %s already exists (set overwrite=true to replace)", path)
+		}
+	}
+
+	dir := filepath.Dir(resolved)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("files: create parent dirs for %s: %w", path, err)
+	}
+
+	if err := os.WriteFile(resolved, data, 0o644); err != nil {
+		return fmt.Errorf("files: write %s: %w", path, err)
+	}
+	return nil
 }
 
-func (fs *LocalFS) MakeDir(_ context.Context, _ string) error {
-	return fmt.Errorf("files: mkdir not implemented in phase 1")
+func (fs *LocalFS) MakeDir(_ context.Context, path string) error {
+	resolved, err := fs.checkAccess(path)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(resolved, 0o755); err != nil {
+		return fmt.Errorf("files: mkdir %s: %w", path, err)
+	}
+	return nil
 }
