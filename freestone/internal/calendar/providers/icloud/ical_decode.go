@@ -2,6 +2,7 @@ package icloud
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -224,19 +225,139 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string, floating *tim
 		e.StartLocal = start.Format(time.RFC3339)
 	}
 
-	// Parse DTEND
-	if p := vevent.Props.Get(ical.PropDateTimeEnd); p != nil {
-		end, _, _, err := parseDateTime(p, floating)
-		if err != nil {
-			return e, fmt.Errorf("parse DTEND %q: %w", p.Value, err)
-		}
-		e.EndUTC = end.UTC()
-		if e.TZID != "" {
-			e.EndLocal = end.Format(time.RFC3339)
-		}
+	span, err := decodeSpan(vevent, start, allDay, floating)
+	if err != nil {
+		return e, err
+	}
+	end := span.endOf(start)
+	e.EndUTC = end.UTC()
+	if e.TZID != "" {
+		e.EndLocal = end.Format(time.RFC3339)
 	}
 
 	return e, nil
+}
+
+// eventSpan is how long a VEVENT lasts: nominal days, added on the wall
+// clock of the start's own location, plus an exact part. DTEND gives an
+// exact span; DURATION gives days and weeks as nominal days (RFC 5545
+// §3.3.6), so a P1D event across a daylight-saving change ends at the same
+// local time the next day. One span serves every instance of a series
+// (RFC 5545 §3.8.5.3).
+type eventSpan struct {
+	days  int
+	exact time.Duration
+}
+
+// endOf is the end of the instance that starts at start.
+func (s eventSpan) endOf(start time.Time) time.Time {
+	return start.AddDate(0, 0, s.days).Add(s.exact)
+}
+
+// decodeSpan reads a VEVENT's span from DTEND or DURATION. RFC 5545 makes
+// them mutually exclusive; when a producer writes both anyway, DTEND is
+// used, because dropping an event the calendar holds is worse than reading
+// past a non-conformant property. With neither, RFC 5545 §3.6.1 fixes it:
+// an event whose DTSTART is a DATE lasts one day, one whose DTSTART is a
+// DATE-TIME ends when it starts. start is the parsed DTSTART.
+func decodeSpan(vevent *ical.Component, start time.Time, allDay bool, floating *time.Location) (eventSpan, error) {
+	dtend := vevent.Props.Get(ical.PropDateTimeEnd)
+	duration := vevent.Props.Get(ical.PropDuration)
+	switch {
+	case dtend != nil:
+		end, _, _, err := parseDateTime(dtend, floating)
+		if err != nil {
+			return eventSpan{}, fmt.Errorf("parse DTEND %q: %w", dtend.Value, err)
+		}
+		return eventSpan{exact: end.Sub(start)}, nil
+	case duration != nil:
+		span, err := parseDuration(duration.Value)
+		if err != nil {
+			return eventSpan{}, fmt.Errorf("parse DURATION %q: %w", duration.Value, err)
+		}
+		return span, nil
+	case allDay:
+		return eventSpan{days: 1}, nil
+	default:
+		return eventSpan{}, nil
+	}
+}
+
+// parseDuration parses an RFC 5545 §3.3.6 DURATION value: P followed by
+// weeks (nW) alone, or by days (nD) and/or a time part (T with nH, nM, nS
+// in that order). Weeks and days are nominal, the time part exact. A
+// negative duration is an error: a VEVENT cannot end before it starts.
+func parseDuration(value string) (eventSpan, error) {
+	s := strings.TrimPrefix(strings.ToUpper(value), "+")
+	if strings.HasPrefix(s, "-") {
+		return eventSpan{}, fmt.Errorf("negative duration")
+	}
+	rest, ok := strings.CutPrefix(s, "P")
+	if !ok {
+		return eventSpan{}, fmt.Errorf("does not start with P")
+	}
+	if rest == "" {
+		return eventSpan{}, fmt.Errorf("no components")
+	}
+
+	// number reads the digits in front of designator; found is false when
+	// rest does not continue with digits and that designator.
+	number := func(designator byte) (n int, found bool, err error) {
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			i++
+		}
+		if i == 0 || i == len(rest) || rest[i] != designator {
+			return 0, false, nil
+		}
+		n, err = strconv.Atoi(rest[:i])
+		if err != nil {
+			return 0, false, err
+		}
+		rest = rest[i+1:]
+		return n, true, nil
+	}
+
+	var span eventSpan
+	if w, found, err := number('W'); err != nil {
+		return eventSpan{}, err
+	} else if found {
+		if rest != "" {
+			return eventSpan{}, fmt.Errorf("weeks combined with other components")
+		}
+		return eventSpan{days: 7 * w}, nil
+	}
+	d, foundDays, err := number('D')
+	if err != nil {
+		return eventSpan{}, err
+	}
+	span.days = d
+	if rest == "" {
+		if !foundDays {
+			return eventSpan{}, fmt.Errorf("no components")
+		}
+		return span, nil
+	}
+	var foundTime bool
+	if rest, foundTime = strings.CutPrefix(rest, "T"); !foundTime || rest == "" {
+		return eventSpan{}, fmt.Errorf("malformed")
+	}
+	for _, unit := range []struct {
+		designator byte
+		size       time.Duration
+	}{{'H', time.Hour}, {'M', time.Minute}, {'S', time.Second}} {
+		n, found, err := number(unit.designator)
+		if err != nil {
+			return eventSpan{}, err
+		}
+		if found {
+			span.exact += time.Duration(n) * unit.size
+		}
+	}
+	if rest != "" {
+		return eventSpan{}, fmt.Errorf("malformed")
+	}
+	return span, nil
 }
 
 // textValue returns a single-valued TEXT property with its RFC 5545 escapes
@@ -289,20 +410,39 @@ func parseDateTimeValue(value string, params ical.Params, floating *time.Locatio
 		return time.Parse("20060102", value)
 	}
 
+	loc, utc, err := dateTimeZone(value, params, floating)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if utc {
+		return time.Parse(dateTimeUTCLayout, value)
+	}
+	return time.ParseInLocation(dateTimeLocalLayout, value, loc)
+}
+
+// The two DATE-TIME forms of RFC 5545 §3.3.5: UTC with a trailing Z, and
+// local (zoned by TZID, or floating) without.
+const (
+	dateTimeUTCLayout   = "20060102T150405Z"
+	dateTimeLocalLayout = "20060102T150405"
+)
+
+// dateTimeZone is the one place that decides which of the three DATE-TIME
+// forms a value has: zoned by its TZID (resolved through resolveLocation),
+// UTC (a trailing Z), or floating, read in floating. utc reports the second
+// form; loc is the location the value's wall clock is read in.
+func dateTimeZone(value string, params ical.Params, floating *time.Location) (loc *time.Location, utc bool, err error) {
 	if tzid := params.Get(ical.ParamTimezoneID); tzid != "" {
 		loc, err := resolveLocation(tzid)
 		if err != nil {
-			return time.Time{}, err
+			return nil, false, err
 		}
-		return time.ParseInLocation("20060102T150405", value, loc)
+		return loc, false, nil
 	}
-
-	// UTC timestamp (ends with Z).
 	if strings.HasSuffix(value, "Z") {
-		return time.Parse("20060102T150405Z", value)
+		return time.UTC, true, nil
 	}
-
-	return time.ParseInLocation("20060102T150405", value, floating)
+	return floating, false, nil
 }
 
 // bareAddress strips the mailto: scheme from a CAL-ADDRESS value, so

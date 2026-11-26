@@ -295,7 +295,7 @@ func (d *Driver) UpdateEvent(ctx context.Context, p calendar.EventPatch) (*calen
 	if p.ETag != "" && p.ETag != obj.ETag {
 		return nil, fmt.Errorf("icloud-calendar: update event %s: etag %q, stored %q: %w", p.UID, p.ETag, obj.ETag, calendar.ErrConflict)
 	}
-	master, err := applyPatch(obj.Data, p, time.Now())
+	master, err := applyPatch(obj.Data, p, time.Now(), d.floating)
 	if err != nil {
 		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", p.UID, err)
 	}

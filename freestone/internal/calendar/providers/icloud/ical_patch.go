@@ -14,7 +14,7 @@ import (
 // the patch sets are touched, so every other property and sub-component
 // (RRULE, VALARM, VTIMEZONE, ATTENDEE parameters, X- properties, overrides)
 // is written back exactly as it was read. It returns the edited VEVENT.
-func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time) (*ical.Component, error) {
+func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time, floating *time.Location) (*ical.Component, error) {
 	master, err := masterEvent(cal, p.UID)
 	if err != nil {
 		return nil, err
@@ -30,17 +30,17 @@ func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time) (*ical
 			return nil, err
 		}
 	} else if p.Start != nil || p.End != nil {
-		loc, err := startLocation(props)
+		form, err := storedTimeForm(props, floating)
 		if err != nil {
 			return nil, err
 		}
 		if p.Start != nil {
-			props.SetDateTime(ical.PropDateTimeStart, p.Start.In(loc))
+			props.Set(form.prop(ical.PropDateTimeStart, *p.Start))
 		}
 		if p.End != nil {
 			// DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1).
 			props.Del(ical.PropDuration)
-			props.SetDateTime(ical.PropDateTimeEnd, p.End.In(loc))
+			props.Set(form.prop(ical.PropDateTimeEnd, *p.End))
 		}
 	}
 
@@ -109,23 +109,51 @@ func wallDate(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-// startLocation is the zone new DTSTART/DTEND values are written in: the
-// existing DTSTART's TZID when it carries one, else UTC. A TZID that does
-// not resolve is an error, not a silent switch to UTC.
-func startLocation(props ical.Props) (*time.Location, error) {
+// timeForm is the DATE-TIME form of the stored DTSTART, which new DTSTART
+// and DTEND values are written in, so a patch moves an event in time but
+// never changes its kind of time: a zoned event keeps its TZID string as
+// the producer wrote it (a Windows name stays a Windows name, matching the
+// VTIMEZONE the object carries), a UTC event stays UTC, and a floating
+// event stays floating.
+type timeForm struct {
+	tzid string         // the stored TZID, "" for UTC and floating
+	loc  *time.Location // the location wall-clock values are written in
+	utc  bool
+}
+
+// storedTimeForm reads the form of the stored DTSTART through
+// dateTimeZone, the seam decoding uses, so any TZID that lists also
+// updates. A TZID that does not resolve is an error, not a silent switch
+// to UTC. Floating values are written in floating, the location they are
+// read in.
+func storedTimeForm(props ical.Props, floating *time.Location) (timeForm, error) {
 	start := props.Get(ical.PropDateTimeStart)
 	if start == nil {
-		return time.UTC, nil
+		return timeForm{}, fmt.Errorf("VEVENT has no DTSTART")
 	}
-	tzid := start.Params.Get(ical.PropTimezoneID)
-	if tzid == "" {
-		return time.UTC, nil
-	}
-	loc, err := time.LoadLocation(tzid)
+	loc, utc, err := dateTimeZone(start.Value, start.Params, floating)
 	if err != nil {
-		return nil, fmt.Errorf("DTSTART TZID %q does not resolve: %w", tzid, err)
+		return timeForm{}, fmt.Errorf("DTSTART: %w", err)
 	}
-	return loc, nil
+	return timeForm{tzid: start.Params.Get(ical.ParamTimezoneID), loc: loc, utc: utc}, nil
+}
+
+// prop is a DATE-TIME property called name for the instant t in this form.
+// go-ical's SetDateTime is not used for local values: it writes the Go
+// location's name as TZID, an IANA name no VTIMEZONE in the object defines,
+// and it cannot write a floating value at all.
+func (f timeForm) prop(name string, t time.Time) *ical.Prop {
+	p := ical.NewProp(name)
+	if f.utc {
+		p.SetDateTime(t.UTC())
+		return p
+	}
+	p.SetValueType(ical.ValueDateTime)
+	p.Value = t.In(f.loc).Format(dateTimeLocalLayout)
+	if f.tzid != "" {
+		p.Params.Set(ical.ParamTimezoneID, f.tzid)
+	}
+	return p
 }
 
 // bumpSequence increments SEQUENCE (absent means 0, RFC 5545 §3.8.7.4).

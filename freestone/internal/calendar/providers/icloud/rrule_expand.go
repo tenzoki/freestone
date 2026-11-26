@@ -23,7 +23,10 @@ func expandSeries(master *ical.Component, base calendar.Event, overrides *overri
 	if err != nil {
 		return nil, err
 	}
-	duration := base.EndUTC.Sub(base.StartUTC)
+	span, err := decodeSpan(master, dtstart, isAllDay(master.Props), floating)
+	if err != nil {
+		return nil, err
+	}
 
 	// Bound expansion to the query window. If no window is provided, default
 	// to 1 year from DTSTART to prevent unbounded memory allocation on rules
@@ -68,7 +71,8 @@ func expandSeries(master *ical.Component, base calendar.Event, overrides *overri
 
 		e := base
 		e.StartUTC = instUTC
-		e.EndUTC = instUTC.Add(duration)
+		// Nominal days of a DURATION fall on the series' own wall clock.
+		e.EndUTC = span.endOf(inst.In(dtstart.Location())).UTC()
 		e.RecurringParentUID = base.UID
 		e.InstanceStartUTC = instUTC
 		if base.TZID != "" {
