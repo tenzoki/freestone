@@ -56,8 +56,8 @@ func TestEventFromGoogle_TimedEvent(t *testing.T) {
 	if ev.Status != "CONFIRMED" {
 		t.Errorf("status = %q, want CONFIRMED", ev.Status)
 	}
-	if ev.Organizer != "Alice" {
-		t.Errorf("organizer = %q, want Alice", ev.Organizer)
+	if ev.Organizer != "alice@example.com" {
+		t.Errorf("organizer = %q, want the address alice@example.com", ev.Organizer)
 	}
 	if len(ev.Attendees) != 2 {
 		t.Errorf("attendees len = %d", len(ev.Attendees))

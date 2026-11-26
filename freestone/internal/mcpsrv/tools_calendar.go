@@ -52,7 +52,7 @@ type updateEventInput struct {
 	Summary     *string `json:"summary,omitempty" jsonschema:"Event title. Omit or null keeps the current value, an empty string clears it."`
 	Description *string `json:"description,omitempty" jsonschema:"Event description. Omit or null keeps the current value, an empty string clears it."`
 	Location    *string `json:"location,omitempty" jsonschema:"Event location. Omit or null keeps the current value, an empty string clears it."`
-	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times. On an iCloud all-day event only the date on this value's own wall clock is used."`
+	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times. On an all-day event (iCloud or Google) only the date on this value's own wall clock is used and the event stays all-day; end is then the exclusive end date and must fall on a later date."`
 	End         *string `json:"end,omitempty" jsonschema:"New end time in RFC3339 format, after start. Give start and end together, or neither to keep the current times."`
 	ETag        string  `json:"etag,omitempty" jsonschema:"ETag for conflict detection (iCloud only)"`
 }

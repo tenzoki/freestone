@@ -69,6 +69,9 @@ func TestUpdateEvent_TitleOnlySendsPatchWithSummaryOnly(t *testing.T) {
 
 func TestUpdateEvent_EmptyStringClearsAndTimesAreSent(t *testing.T) {
 	h := newCalendarAPIHarness(t)
+	// A patch that moves times first reads the stored event to learn
+	// whether it is all-day; patchedEvent is timed.
+	h.respond(http.MethodGet, patchPath, http.StatusOK, patchedEvent)
 	h.respond(http.MethodPatch, patchPath, http.StatusOK, patchedEvent)
 
 	empty := ""
@@ -82,7 +85,11 @@ func TestUpdateEvent_EmptyStringClearsAndTimesAreSent(t *testing.T) {
 		t.Fatalf("UpdateEvent: %v", err)
 	}
 
-	body := h.only().JSON(t)
+	reqs := h.recorded()
+	if len(reqs) != 2 || reqs[0].Method != http.MethodGet || reqs[1].Method != http.MethodPatch {
+		t.Fatalf("requests = %+v, want GET then PATCH", reqs)
+	}
+	body := reqs[1].JSON(t)
 	if got := bodyKeys(body); !reflect.DeepEqual(got, []string{"description", "end", "start"}) {
 		t.Errorf("body fields = %v, want [description end start]", got)
 	}

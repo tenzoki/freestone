@@ -195,11 +195,11 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string, floating *tim
 		*f.dst = text
 	}
 	if p := vevent.Props.Get(ical.PropOrganizer); p != nil {
-		e.Organizer = p.Value
+		e.Organizer = bareAddress(p.Value)
 	}
 
 	for _, p := range vevent.Props.Values(ical.PropAttendee) {
-		e.Attendees = append(e.Attendees, p.Value)
+		e.Attendees = append(e.Attendees, bareAddress(p.Value))
 	}
 
 	// Parse DTSTART
@@ -295,4 +295,15 @@ func parseDateTimeValue(value string, params ical.Params, floating *time.Locatio
 	}
 
 	return time.ParseInLocation("20060102T150405", value, floating)
+}
+
+// bareAddress strips the mailto: scheme from a CAL-ADDRESS value, so
+// organizer and attendees read as plain addresses on both providers. The
+// scheme is case-insensitive (RFC 3986 §3.1); any other URI is kept as is.
+func bareAddress(v string) string {
+	const scheme = "mailto:"
+	if len(v) >= len(scheme) && strings.EqualFold(v[:len(scheme)], scheme) {
+		return v[len(scheme):]
+	}
+	return v
 }

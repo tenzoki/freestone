@@ -21,13 +21,10 @@ func eventFromGoogle(item *calendar.Event) (domain.Event, error) {
 		Status:      strings.ToUpper(item.Status),
 	}
 
-	// Organizer
+	// Organizer is the address, as on iCloud and as the write path sends it;
+	// the display name is not an identifier.
 	if item.Organizer != nil {
-		if item.Organizer.DisplayName != "" {
-			ev.Organizer = item.Organizer.DisplayName
-		} else {
-			ev.Organizer = item.Organizer.Email
-		}
+		ev.Organizer = item.Organizer.Email
 	}
 
 	// Attendees
@@ -140,7 +137,9 @@ func domainToGoogle(e domain.Event) *calendar.Event {
 // patchToGoogle builds the body of an Events.Patch call: only the fields the
 // patch sets. The client omits empty strings from JSON, so a field cleared
 // with "" is named in ForceSendFields to reach the server as "" and clear it.
-func patchToGoogle(p domain.EventPatch) *calendar.Event {
+// allDay says whether the stored event is all-day; it matters only when the
+// patch sets times.
+func patchToGoogle(p domain.EventPatch, allDay bool) (*calendar.Event, error) {
 	ge := &calendar.Event{}
 	setText := func(field string, v *string, dst *string) {
 		if v == nil {
@@ -154,6 +153,12 @@ func patchToGoogle(p domain.EventPatch) *calendar.Event {
 	setText("Summary", p.Summary, &ge.Summary)
 	setText("Description", p.Description, &ge.Description)
 	setText("Location", p.Location, &ge.Location)
+	if allDay {
+		if err := patchAllDayDates(ge, p.Start, p.End); err != nil {
+			return nil, err
+		}
+		return ge, nil
+	}
 	// The instant keeps the offset the caller gave it. No timeZone is sent,
 	// so the patch does not name one for the event.
 	if p.Start != nil {
@@ -162,7 +167,33 @@ func patchToGoogle(p domain.EventPatch) *calendar.Event {
 	if p.End != nil {
 		ge.End = &calendar.EventDateTime{DateTime: p.End.Format(time.RFC3339)}
 	}
-	return ge
+	return ge, nil
+}
+
+// patchAllDayDates keeps an all-day event all-day: it sends start.date and
+// end.date and no dateTime, which Google would read as a switch to a timed
+// event. Each date is the one on the value's own wall clock, not its UTC
+// date, so 2026-11-26T00:00:00+01:00 stays the 26th; the iCloud driver
+// writes the same dates. The end date is exclusive and must fall after the
+// start date.
+func patchAllDayDates(ge *calendar.Event, start, end *time.Time) error {
+	if start != nil && end != nil && wallDate(*end) <= wallDate(*start) {
+		return fmt.Errorf("all-day end date %s must be after start date %s",
+			wallDate(*end), wallDate(*start))
+	}
+	if start != nil {
+		ge.Start = &calendar.EventDateTime{Date: wallDate(*start)}
+	}
+	if end != nil {
+		ge.End = &calendar.EventDateTime{Date: wallDate(*end)}
+	}
+	return nil
+}
+
+// wallDate is the calendar date of t in t's own location, as YYYY-MM-DD.
+// The fixed-width form orders as a string in date order.
+func wallDate(t time.Time) string {
+	return t.Format(time.DateOnly)
 }
 
 // parseDateTimeField parses an RFC3339 dateTime string and an optional IANA

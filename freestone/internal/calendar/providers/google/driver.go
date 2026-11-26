@@ -77,6 +77,7 @@ func (d *Driver) ListEvents(ctx context.Context, q domain.EventQuery) (domain.Ev
 			if err != nil {
 				return err
 			}
+			ev.CalendarID = q.CalendarID
 			events = append(events, ev)
 		}
 		return nil
@@ -97,6 +98,7 @@ func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*domain.
 	if err != nil {
 		return nil, err
 	}
+	ev.CalendarID = calendarID
 	return &ev, nil
 }
 
@@ -127,7 +129,23 @@ func (d *Driver) UpdateEvent(ctx context.Context, p domain.EventPatch) (*domain.
 	if p.UID == "" {
 		return nil, fmt.Errorf("google calendar: update requires uid")
 	}
-	updated, err := d.svc.Events.Patch(p.CalendarID, p.UID, patchToGoogle(p)).Context(ctx).Do()
+	allDay := false
+	if p.Start != nil || p.End != nil {
+		// The patch carries no all-day flag, and a dateTime sent to an
+		// all-day event turns it into a timed one, so a patch that moves
+		// times first reads how the stored event is dated. A patch that
+		// changes no times needs no read.
+		stored, err := d.svc.Events.Get(p.CalendarID, p.UID).Context(ctx).Do()
+		if err != nil {
+			return nil, fmt.Errorf("google calendar: update event %s: read stored event: %w", p.UID, err)
+		}
+		allDay = stored.Start != nil && stored.Start.Date != ""
+	}
+	body, err := patchToGoogle(p, allDay)
+	if err != nil {
+		return nil, fmt.Errorf("google calendar: update event %s: %w", p.UID, err)
+	}
+	updated, err := d.svc.Events.Patch(p.CalendarID, p.UID, body).Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("google calendar: update event %s: %w", p.UID, err)
 	}
