@@ -26,9 +26,9 @@ func (p *conflictProvider) UpdateEvent(_ context.Context, patch calendar.EventPa
 	return nil, fmt.Errorf("stub: update event %s: %w", patch.UID, calendar.ErrConflict)
 }
 
-func (p *conflictProvider) DeleteEvent(_ context.Context, _, uid, etag string) error {
-	p.gotETags = append(p.gotETags, etag)
-	return fmt.Errorf("stub: delete event %s: %w", uid, calendar.ErrConflict)
+func (p *conflictProvider) DeleteEvent(_ context.Context, del calendar.EventDeletion) error {
+	p.gotETags = append(p.gotETags, del.ETag)
+	return fmt.Errorf("stub: delete event %s: %w", del.UID, calendar.ErrConflict)
 }
 
 // A stale etag reaches the caller as an error result, not a success and not

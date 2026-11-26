@@ -14,12 +14,41 @@ import (
 // the patch sets are touched, so every other property and sub-component
 // (RRULE, VALARM, VTIMEZONE, ATTENDEE parameters, X- properties, overrides)
 // is written back exactly as it was read. It returns the edited VEVENT.
+//
+// A recurring object is edited only under calendar.ScopeSeries, and a time
+// change then moves the series' RECURRENCE-IDs and EXDATEs with it
+// (shiftSeries). DURATION is dropped from any VEVENT that also has DTEND,
+// since the object could not be encoded otherwise.
 func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time, floating *time.Location) (*ical.Component, error) {
+	s, err := seriesOf(cal, p.UID)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkUpdateScope(s, p.Scope); err != nil {
+		return nil, err
+	}
 	master, err := masterEvent(cal, p.UID)
 	if err != nil {
 		return nil, err
 	}
 	props := master.Props
+
+	// The shift is measured before DTSTART is rewritten, on the series'
+	// own wall clock (UTC dates for an all-day series).
+	var shift wallShift
+	var seriesLoc *time.Location
+	if s.recurring() && p.Start != nil {
+		oldStart, err := recurrenceStart(master, floating)
+		if err != nil {
+			return nil, err
+		}
+		seriesLoc = oldStart.Location()
+		newStart := p.Start.In(seriesLoc)
+		if isAllDay(props) {
+			newStart = wallDate(*p.Start)
+		}
+		shift = wallShiftBetween(oldStart, newStart)
+	}
 
 	patchText(props, ical.PropSummary, p.Summary)
 	patchText(props, ical.PropDescription, p.Description)
@@ -44,8 +73,14 @@ func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time, floati
 		}
 	}
 
-	props.SetDateTime(ical.PropDateTimeStamp, now.UTC())
-	if err := bumpSequence(props); err != nil {
+	if s.recurring() {
+		if err := shiftSeries(s, shift, seriesLoc, floating); err != nil {
+			return nil, err
+		}
+	}
+	dropDurationShadowedByDTEnd(cal)
+
+	if err := bumpEdited(props, now); err != nil {
 		return nil, err
 	}
 	return master, nil

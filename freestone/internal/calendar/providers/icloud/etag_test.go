@@ -22,7 +22,7 @@ func TestUpdateEvent_StaleETagIsConflictWithoutPut(t *testing.T) {
 
 	summary := "Standup v2"
 	_, err := d.UpdateEvent(context.Background(), calendar.EventPatch{
-		CalendarID: cal, UID: "uid-1", Summary: &summary, ETag: "stale",
+		CalendarID: cal, UID: "uid-1", Summary: &summary, ETag: "stale", Scope: calendar.ScopeSeries,
 	})
 	if !errors.Is(err, calendar.ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
@@ -47,7 +47,7 @@ func TestUpdateEvent_CurrentETagWritesConditionally(t *testing.T) {
 
 	summary := "Standup v2"
 	updated, err := d.UpdateEvent(context.Background(), calendar.EventPatch{
-		CalendarID: cal, UID: "uid-1", Summary: &summary, ETag: etag,
+		CalendarID: cal, UID: "uid-1", Summary: &summary, ETag: etag, Scope: calendar.ScopeSeries,
 	})
 	if err != nil {
 		t.Fatalf("UpdateEvent: %v", err)
@@ -70,7 +70,7 @@ func TestDeleteEvent_StaleETagIsConflict(t *testing.T) {
 	h.seedObject(href, richEventICS)
 	d := h.driver()
 
-	err := d.DeleteEvent(context.Background(), cal, "uid-1", "stale")
+	err := d.DeleteEvent(context.Background(), calendar.EventDeletion{CalendarID: cal, UID: "uid-1", ETag: "stale", Scope: calendar.ScopeSeries})
 	if !errors.Is(err, calendar.ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
 	}
@@ -90,7 +90,7 @@ func TestDeleteEvent_CurrentETagSentQuoted(t *testing.T) {
 	etag := h.seedObject(href, richEventICS)
 	d := h.driver()
 
-	if err := d.DeleteEvent(context.Background(), cal, "uid-1", etag); err != nil {
+	if err := d.DeleteEvent(context.Background(), calendar.EventDeletion{CalendarID: cal, UID: "uid-1", ETag: etag, Scope: calendar.ScopeSeries}); err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
 	dels := h.recordedWith(http.MethodDelete)
@@ -111,7 +111,7 @@ func TestDeleteEvent_NoETagUsesResolvedOne(t *testing.T) {
 	etag := h.seedObject(href, richEventICS)
 	d := h.driver()
 
-	if err := d.DeleteEvent(context.Background(), cal, "uid-1", ""); err != nil {
+	if err := d.DeleteEvent(context.Background(), calendar.EventDeletion{CalendarID: cal, UID: "uid-1", Scope: calendar.ScopeSeries}); err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
 	dels := h.recordedWith(http.MethodDelete)

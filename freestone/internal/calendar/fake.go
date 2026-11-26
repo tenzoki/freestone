@@ -87,15 +87,17 @@ func (f *Fake) UpdateEvent(_ context.Context, p EventPatch) (*Event, error) {
 	return nil, fmt.Errorf("fake: event %s not found", p.UID)
 }
 
-func (f *Fake) DeleteEvent(_ context.Context, calendarID, uid, _ string) error {
-	events := f.Events[calendarID]
+// DeleteEvent removes the event by UID; the fake holds no series, so the
+// deletion's scope and recurrence ID are not consulted.
+func (f *Fake) DeleteEvent(_ context.Context, d EventDeletion) error {
+	events := f.Events[d.CalendarID]
 	for i, e := range events {
-		if e.UID == uid {
-			f.Events[calendarID] = append(events[:i], events[i+1:]...)
+		if e.UID == d.UID {
+			f.Events[d.CalendarID] = append(events[:i], events[i+1:]...)
 			return nil
 		}
 	}
-	return fmt.Errorf("fake: event %s not found", uid)
+	return fmt.Errorf("fake: event %s not found", d.UID)
 }
 
 // NewFakeRegistry creates a Registry populated with the given fakes.

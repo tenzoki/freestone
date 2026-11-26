@@ -38,6 +38,11 @@ type Event struct {
 	ETag               string    `json:"etag,omitempty"`
 	RecurringParentUID string    `json:"recurring_parent_uid,omitempty"`
 	InstanceStartUTC   time.Time `json:"instance_start_utc,omitempty"`
+	// RecurrenceID addresses one occurrence of an iCloud series: its
+	// original start, RFC3339, the value its RECURRENCE-ID has or would
+	// have. An override carries its RECURRENCE-ID, not its moved start.
+	// Google addresses occurrences by UID and leaves it empty.
+	RecurrenceID string `json:"recurrence_id,omitempty"`
 }
 
 // Calendar represents a single calendar container.
@@ -81,6 +86,43 @@ type EventPatch struct {
 	// ETag is the opaque entity tag, unquoted; "" means the caller asks for
 	// no conditional write of its own.
 	ETag string
+	// Scope says what part of a recurring event the update addresses.
+	Scope Scope
+}
+
+// EventDeletion names the event to delete. ETag is as in EventPatch.
+// RecurrenceID, the zero time when absent, picks the occurrence a
+// ScopeInstance deletion removes.
+type EventDeletion struct {
+	CalendarID   string
+	UID          string
+	ETag         string
+	Scope        Scope
+	RecurrenceID time.Time
+}
+
+// Scope says what part of a recurring event an update or delete addresses.
+// Which scopes a provider accepts is the provider's to decide: an iCloud
+// series is one object and needs one, a Google occurrence has its own UID.
+type Scope string
+
+const (
+	// ScopeUnspecified is the default: the caller named no scope.
+	ScopeUnspecified Scope = ""
+	// ScopeSeries addresses every occurrence of the series.
+	ScopeSeries Scope = "series"
+	// ScopeInstance addresses the one occurrence a recurrence ID names.
+	ScopeInstance Scope = "instance"
+)
+
+// ParseScope reads a scope as a caller writes it; "" is ScopeUnspecified.
+func ParseScope(s string) (Scope, error) {
+	switch sc := Scope(s); sc {
+	case ScopeUnspecified, ScopeSeries, ScopeInstance:
+		return sc, nil
+	default:
+		return "", fmt.Errorf("calendar: unknown scope %q; want \"series\" or \"instance\"", s)
+	}
 }
 
 // Provider defines the contract each calendar backend must implement.
@@ -92,7 +134,7 @@ type Provider interface {
 	// Phase 2 write operations
 	CreateEvent(ctx context.Context, calendarID string, e Event) (*Event, error)
 	UpdateEvent(ctx context.Context, p EventPatch) (*Event, error)
-	DeleteEvent(ctx context.Context, calendarID, uid, etag string) error
+	DeleteEvent(ctx context.Context, d EventDeletion) error
 }
 
 // Registry routes calendar operations to the appropriate provider.

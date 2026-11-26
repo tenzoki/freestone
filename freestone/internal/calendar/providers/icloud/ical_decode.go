@@ -141,10 +141,18 @@ func decodeOverrides(vevents []*ical.Component, etag, calendarID string, floatin
 		}
 		e.RecurringParentUID = e.UID
 		e.InstanceStartUTC = key
+		e.RecurrenceID = recurrenceIDOf(rid)
 		set.order = append(set.order, key)
 		set.byStart[key] = e
 	}
 	return set, nil
+}
+
+// recurrenceIDOf is the recurrence_id a listed occurrence carries: its
+// original start on the wall clock it was read in. calendar_delete_event
+// takes the value back to address the occurrence.
+func recurrenceIDOf(originalStart time.Time) string {
+	return originalStart.Format(time.RFC3339)
 }
 
 // take returns the override for the instance at instUTC and marks it used.

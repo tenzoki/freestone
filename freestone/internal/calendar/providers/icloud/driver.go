@@ -313,19 +313,39 @@ func (d *Driver) UpdateEvent(ctx context.Context, p calendar.EventPatch) (*calen
 	return &e, nil
 }
 
-// DeleteEvent removes the object holding uid, conditional on the caller's
-// etag when one is given and otherwise on the version just resolved, so a
-// change made in between is never deleted unseen.
-func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, etag string) error {
-	obj, err := d.loadObject(ctx, calendarID, uid)
+// DeleteEvent removes the object holding the event, or, for one occurrence
+// of a series, writes the object back without it (applyDeletion decides
+// which). Both writes are conditional: removing the object on the caller's
+// etag when one is given and otherwise on the version just resolved, and
+// writing it back on the version that was edited, after checking the
+// caller's etag against it. A change made in between is never lost unseen.
+func (d *Driver) DeleteEvent(ctx context.Context, del calendar.EventDeletion) error {
+	obj, err := d.loadObject(ctx, del.CalendarID, del.UID)
 	if err != nil {
 		return err
 	}
-	if etag == "" {
-		etag = obj.ETag
+	removeObject, err := applyDeletion(obj.Data, del, time.Now(), d.floating)
+	if err != nil {
+		return fmt.Errorf("icloud-calendar: delete event %s: %w", del.UID, err)
 	}
-	if err := d.client.RemoveAll(ctx, obj.Path, &webdav.RemoveAllOptions{IfMatch: ifMatch(etag)}); err != nil {
-		return fmt.Errorf("icloud-calendar: delete event %s: %w", uid, err)
+
+	if removeObject {
+		etag := del.ETag
+		if etag == "" {
+			etag = obj.ETag
+		}
+		if err := d.client.RemoveAll(ctx, obj.Path, &webdav.RemoveAllOptions{IfMatch: ifMatch(etag)}); err != nil {
+			return fmt.Errorf("icloud-calendar: delete event %s: %w", del.UID, err)
+		}
+		return nil
+	}
+
+	if del.ETag != "" && del.ETag != obj.ETag {
+		return fmt.Errorf("icloud-calendar: delete occurrence of %s: etag %q, stored %q: %w", del.UID, del.ETag, obj.ETag, calendar.ErrConflict)
+	}
+	opts := &caldav.PutCalendarObjectOptions{IfMatch: ifMatch(obj.ETag)}
+	if _, err := d.client.PutCalendarObject(ctx, obj.Path, obj.Data, opts); err != nil {
+		return fmt.Errorf("icloud-calendar: delete occurrence of %s: %w", del.UID, err)
 	}
 	return nil
 }

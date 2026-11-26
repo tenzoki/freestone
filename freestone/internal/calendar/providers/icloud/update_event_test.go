@@ -63,9 +63,10 @@ END:VEVENT
 END:VCALENDAR
 `
 
-// updateSummary is a title-only update, the call D1 broke.
+// updateSummary is a title-only update of a whole series, the call D1
+// broke.
 func updateSummary(ctx context.Context, d *Driver, calendarID, uid, summary string) (*calendar.Event, error) {
-	return d.UpdateEvent(ctx, calendar.EventPatch{CalendarID: calendarID, UID: uid, Summary: &summary})
+	return d.UpdateEvent(ctx, calendar.EventPatch{CalendarID: calendarID, UID: uid, Summary: &summary, Scope: calendar.ScopeSeries})
 }
 
 // harnessComponent returns the index-th child called name, or reports it
@@ -182,7 +183,7 @@ func TestUpdateEvent_EmptyStringClearsAndTimesKeepZone(t *testing.T) {
 	start := time.Date(2026, 11, 26, 13, 30, 0, 0, time.UTC) // 14:30 in Berlin
 	end := start.Add(30 * time.Minute)
 	_, err := d.UpdateEvent(context.Background(), calendar.EventPatch{
-		CalendarID: cal, UID: "uid-1", Location: &empty, Start: &start, End: &end,
+		CalendarID: cal, UID: "uid-1", Location: &empty, Start: &start, End: &end, Scope: calendar.ScopeSeries,
 	})
 	if err != nil {
 		t.Fatalf("UpdateEvent: %v", err)
@@ -229,13 +230,13 @@ func TestGetAndDeleteEvent_GoThroughLoadObject(t *testing.T) {
 		t.Errorf("GetEvent = uid %q etag %q, want uid-1 %q", got.UID, got.ETag, etag)
 	}
 
-	if err := d.DeleteEvent(ctx, cal, "uid-1", ""); err != nil {
+	if err := d.DeleteEvent(ctx, calendar.EventDeletion{CalendarID: cal, UID: "uid-1", Scope: calendar.ScopeSeries}); err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
 	if _, ok := h.object(href); ok {
 		t.Errorf("object %s still stored after delete", href)
 	}
-	if err := d.DeleteEvent(ctx, cal, "uid-1", ""); err == nil {
+	if err := d.DeleteEvent(ctx, calendar.EventDeletion{CalendarID: cal, UID: "uid-1", Scope: calendar.ScopeSeries}); err == nil {
 		t.Errorf("second DeleteEvent: want not-found error")
 	}
 }

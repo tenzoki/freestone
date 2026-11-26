@@ -46,7 +46,7 @@ func TestDeleteEvent_ETagSentQuotedAsIfMatch(t *testing.T) {
 	h := newCalendarAPIHarness(t)
 	h.respond(http.MethodDelete, patchPath, http.StatusNoContent, "")
 
-	if err := h.driver().DeleteEvent(context.Background(), "primary", "evt-1", "123"); err != nil {
+	if err := h.driver().DeleteEvent(context.Background(), domain.EventDeletion{CalendarID: "primary", UID: "evt-1", ETag: "123"}); err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
 	if got := h.only().Header.Get("If-Match"); got != `"123"` {
@@ -58,7 +58,7 @@ func TestDeleteEvent_NoETagSendsNoIfMatch(t *testing.T) {
 	h := newCalendarAPIHarness(t)
 	h.respond(http.MethodDelete, patchPath, http.StatusNoContent, "")
 
-	if err := h.driver().DeleteEvent(context.Background(), "primary", "evt-1", ""); err != nil {
+	if err := h.driver().DeleteEvent(context.Background(), domain.EventDeletion{CalendarID: "primary", UID: "evt-1"}); err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
 	if got, ok := h.only().Header["If-Match"]; ok {
@@ -70,7 +70,7 @@ func TestDeleteEvent_StaleETagIsConflict(t *testing.T) {
 	h := newCalendarAPIHarness(t)
 	h.respond(http.MethodDelete, patchPath, http.StatusPreconditionFailed, googleConflict)
 
-	err := h.driver().DeleteEvent(context.Background(), "primary", "evt-1", "stale")
+	err := h.driver().DeleteEvent(context.Background(), domain.EventDeletion{CalendarID: "primary", UID: "evt-1", ETag: "stale"})
 	if !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
 	}

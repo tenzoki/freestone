@@ -113,16 +113,27 @@ The `provider` parameter selects which backend to use (`icloud` or `google`). Om
 | `calendar_list_events` | List events in a calendar within a time range (RFC3339 `start`/`end`). Returns `{"events": [...], "warnings": [...]}`: `events` is `[]` for an empty window, `warnings` names each calendar object that could not be read and was left out (its href and the reason), and is omitted when empty. |
 | `calendar_get_event` | Get a single event by UID. |
 | `calendar_create_event` | Create a new event (summary, start, end, optional description/location, `all_day`). |
-| `calendar_update_event` | Partial update of an existing event by UID: only the fields you pass change. |
-| `calendar_delete_event` | Delete an event by UID, optionally conditional on its `etag`. |
+| `calendar_update_event` | Partial update of an existing event by UID: only the fields you pass change. A recurring iCloud event needs `scope: "series"` (see **Recurring events**). |
+| `calendar_delete_event` | Delete an event by UID, optionally conditional on its `etag`. A recurring iCloud event needs `scope`: `"series"`, or `"instance"` with `recurrence_id` (see **Recurring events**). |
 
-**Events.** An event carries `provider`, `calendar_id` (on both providers), `uid`, `summary`, `description`, `location`, `start_utc`/`end_utc`, `start_local`/`end_local` and `tzid` (the time zone as the producer named it), `all_day`, `organizer`, `attendees`, `status`, `etag`, and for an instance of a recurring series `recurring_parent_uid` and `instance_start_utc`. `organizer` and `attendees` are mail addresses on both providers: Google gives the organizer's address, not the display name, and iCloud strips the `mailto:` prefix (other URI schemes are kept as they are).
+**Events.** An event carries `provider`, `calendar_id` (on both providers), `uid`, `summary`, `description`, `location`, `start_utc`/`end_utc`, `start_local`/`end_local` and `tzid` (the time zone as the producer named it), `all_day`, `organizer`, `attendees`, `status`, `etag`, and for an instance of a recurring series `recurring_parent_uid` and `instance_start_utc`, and on iCloud `recurrence_id`: the occurrence's original start (RFC3339), which is its `RECURRENCE-ID` when it was moved, not its new start. `organizer` and `attendees` are mail addresses on both providers: Google gives the organizer's address, not the display name, and iCloud strips the `mailto:` prefix (other URI schemes are kept as they are).
 
-**Partial updates (`calendar_update_event`).** For `summary`, `description` and `location`, omitting the field or passing `null` keeps the current value, and `""` clears it. `start` and `end` are given together or not at all, and `end` must be after `start`. Everything else on the event (attendees, recurrence, alarms, time zones, overrides, other properties) is left as it is.
+**Partial updates (`calendar_update_event`).** For `summary`, `description` and `location`, omitting the field or passing `null` keeps the current value, and `""` clears it. `start` and `end` are given together or not at all, and `end` must be after `start`. Everything else on the event (attendees, recurrence, alarms, time zones, overrides, other properties) is left as it is. On iCloud, an update of a recurring event changes the whole series and is refused without `scope: "series"`. An event that carries both `DTEND` and `DURATION` (not allowed by RFC 5545, but written by some producers) is read by its `DTEND`; an update drops the `DURATION`, so the end the event showed is kept.
 
 **All-day events.** On create, set `all_day` and give `start` and `end` as dates (`YYYY-MM-DD`; RFC3339 is accepted too). The date written is the one on the value's own wall clock, never converted to UTC. `end` is exclusive: a one-day event on 2026-11-26 ends 2026-11-27. On update, an all-day event stays all-day on both providers: only the date of each new time's own wall clock is used, and the end must fall on a later date.
 
 **Recurring events.** Google expands series itself. On iCloud, freestone expands them in the event's own time zone, so a weekly 09:00 meeting stays at 09:00 local across a daylight-saving change and `BYDAY` matches the local date. Moved instances (`RECURRENCE-ID`) replace the instance they move, and `EXDATE` and `RDATE` are applied; at most 366 instances are expanded per series. An object freestone cannot expand is left out and named in `warnings` rather than shown wrongly.
+
+Update and delete address occurrences differently on the two providers:
+
+| | Google | iCloud |
+|---|---|---|
+| `uid` of a listed occurrence | the occurrence's own id | the series UID, shared by every occurrence |
+| Update or delete without `scope` | changes or removes that one occurrence | refused for a recurring event, with an error naming the series |
+| `scope: "series"` | not accepted | update or delete the whole series |
+| `scope: "instance"` | not accepted | delete only, with `recurrence_id` from `calendar_list_events`: removes that one occurrence. An update with `"instance"` is refused, since single-occurrence edits are not supported on iCloud |
+
+On iCloud, a series update that moves `start` moves every moved occurrence's `RECURRENCE-ID` and every `EXDATE` by the same amount on the series' own wall clock, so moved occurrences stay single and cancelled ones stay cancelled. If a moved value would then fall on a day or time the rule no longer produces (for example a weekly Thursday series moved to a Friday), the update is refused and nothing is written. Deleting one occurrence adds an `EXDATE` in the form of the series' `DTSTART` (zoned, UTC, floating, or a date for an all-day series) and removes that occurrence's moved copy if it has one; a `recurrence_id` that is not an occurrence of the series is an error. A non-recurring event needs no `scope`; `"series"` is accepted on it and `"instance"` is an error. On Google, `scope` and `recurrence_id` are errors: an occurrence is addressed by its own `uid`.
 
 **Time zones (iCloud).** A `TZID` may be an IANA name or a Windows zone name as Outlook and Exchange write it (e.g. `W. Europe Standard Time`, mapped through the CLDR table in `internal/calendar/providers/icloud/tzdata/`). An unknown `TZID` fails that object, which is then named in `warnings`. Floating times (no zone) are read in the local time zone of the machine freestone runs on. iCal text values (`SUMMARY`, `DESCRIPTION`, `LOCATION`, `STATUS`) are unescaped; a malformed escape fails the object.
 
@@ -215,5 +226,7 @@ The tests run against in-process stand-ins for CalDAV, IMAP and the Google APIs,
 
 - iCloud accepted the quoted `If-Match` header on an event update.
 - After commit `ee1d486`, `calendar_list_events` returned whole events (before it, iCloud listing returned events with no UID, title or times).
+- An event created in Calendar.app was read, updated and deleted through freestone.
+- An update with a stale `etag` was refused with the error saying to re-fetch the event.
 
-Not yet verified live: reading, updating and deleting an iCloud event created by another app, and a stale-etag conflict on either provider.
+Not yet verified live: a stale-etag conflict on Google, and the recurring-event `scope` and `recurrence_id` behaviour on iCloud.

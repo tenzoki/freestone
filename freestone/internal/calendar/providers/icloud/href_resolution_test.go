@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/emersion/go-ical"
+
+	"github.com/kai/freestone/internal/calendar"
 )
 
 // D8: other CalDAV clients choose their own object hrefs (RFC 4791 §5.3.2),
@@ -113,7 +115,7 @@ func TestDeleteEvent_RemovesResolvedHref(t *testing.T) {
 	h.seedObject(cal+"XYZ-other.ics", uid10ICS)
 	d := h.driver()
 
-	if err := d.DeleteEvent(context.Background(), cal, "uid-1", ""); err != nil {
+	if err := d.DeleteEvent(context.Background(), calendar.EventDeletion{CalendarID: cal, UID: "uid-1", Scope: calendar.ScopeSeries}); err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
 	if got := h.hrefs(); len(got) != 1 || got[0] != cal+"XYZ-other.ics" {
@@ -156,7 +158,7 @@ func TestLoadObject_DuplicateUIDNamesEveryHref(t *testing.T) {
 			t.Errorf("error %q does not name %s", err, href)
 		}
 	}
-	if err := d.DeleteEvent(context.Background(), cal, "uid-1", ""); err == nil {
+	if err := d.DeleteEvent(context.Background(), calendar.EventDeletion{CalendarID: cal, UID: "uid-1", Scope: calendar.ScopeSeries}); err == nil {
 		t.Errorf("DeleteEvent: want the duplicate error, got nil")
 	}
 	if got := h.hrefs(); len(got) != 2 {

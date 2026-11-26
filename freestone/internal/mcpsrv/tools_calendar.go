@@ -55,13 +55,16 @@ type updateEventInput struct {
 	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times. On an all-day event (iCloud or Google) only the date on this value's own wall clock is used and the event stays all-day; end is then the exclusive end date and must fall on a later date."`
 	End         *string `json:"end,omitempty" jsonschema:"New end time in RFC3339 format, after start. Give start and end together, or neither to keep the current times."`
 	ETag        string  `json:"etag,omitempty" jsonschema:"The event's etag as last read, passed back exactly as received. When given, the update is made only if the event is unchanged since then; otherwise the call fails and the event must be re-fetched."`
+	Scope       string  `json:"scope,omitempty" jsonschema:"iCloud only. Which part of a recurring event the update changes. iCloud lists every occurrence of a series under the series uid, so an update of a recurring iCloud event is refused unless scope is \"series\", which changes every occurrence (a time change moves the whole series, its moved and cancelled occurrences included). \"instance\" is refused: single-occurrence edits are not supported on iCloud. Not needed for a non-recurring event. Not accepted for google, where each occurrence has its own uid."`
 }
 
 type deleteEventInput struct {
-	Provider   string `json:"provider" jsonschema:"Provider name (icloud or google)"`
-	CalendarID string `json:"calendar_id" jsonschema:"Calendar ID"`
-	UID        string `json:"uid" jsonschema:"Event UID to delete"`
-	ETag       string `json:"etag,omitempty" jsonschema:"The event's etag as last read, passed back exactly as received. When given, the delete is made only if the event is unchanged since then; otherwise the call fails and the event must be re-fetched."`
+	Provider     string `json:"provider" jsonschema:"Provider name (icloud or google)"`
+	CalendarID   string `json:"calendar_id" jsonschema:"Calendar ID"`
+	UID          string `json:"uid" jsonschema:"Event UID to delete"`
+	ETag         string `json:"etag,omitempty" jsonschema:"The event's etag as last read, passed back exactly as received. When given, the delete is made only if the event is unchanged since then; otherwise the call fails and the event must be re-fetched."`
+	Scope        string `json:"scope,omitempty" jsonschema:"iCloud only. Which part of a recurring event the delete removes. iCloud lists every occurrence of a series under the series uid, so a delete of a recurring iCloud event is refused unless scope is given: \"series\" deletes every occurrence, \"instance\" deletes the one occurrence recurrence_id names. Not needed for a non-recurring event. Not accepted for google, where each occurrence has its own uid."`
+	RecurrenceID string `json:"recurrence_id,omitempty" jsonschema:"iCloud only, required with scope \"instance\": the occurrence's recurrence_id exactly as calendar_list_events returns it (its original start, RFC3339). A value that is not an occurrence of the series is an error. Not accepted for google, where each occurrence has its own uid."`
 }
 
 func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Logger, log *slog.Logger) {
@@ -95,7 +98,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 	mcp.AddTool(srv,
 		&mcp.Tool{
 			Name:        "calendar_list_events",
-			Description: "List events in a calendar within a time range. Returns {events, warnings}; warnings names each calendar object that could not be read and was left out.",
+			Description: "List events in a calendar within a time range. Returns {events, warnings}; warnings names each calendar object that could not be read and was left out. Each occurrence of an iCloud series carries the series uid and its own recurrence_id, which calendar_delete_event takes with scope \"instance\"; a Google occurrence has its own uid.",
 		},
 		withLog(log, "calendar_list_events", func(ctx context.Context, _ *mcp.CallToolRequest, input listEventsInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
@@ -189,7 +192,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 	mcp.AddTool(srv,
 		&mcp.Tool{
 			Name:        "calendar_update_event",
-			Description: "Update an existing calendar event; only the fields you pass change. For summary, description and location: omit or null keeps the current value, an empty string clears it. Start and end are given together or not at all.",
+			Description: "Update an existing calendar event; only the fields you pass change. For summary, description and location: omit or null keeps the current value, an empty string clears it. Start and end are given together or not at all. Recurring events differ per provider. iCloud: an occurrence's uid is the series uid, so an update of a recurring event is refused unless scope is \"series\", which changes the whole series; one occurrence cannot be updated. Google: each occurrence has its own uid and the update changes only that occurrence; scope is not accepted.",
 		},
 		withLog(log, "calendar_update_event", func(ctx context.Context, _ *mcp.CallToolRequest, input updateEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
@@ -217,7 +220,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 	mcp.AddTool(srv,
 		&mcp.Tool{
 			Name:        "calendar_delete_event",
-			Description: "Delete a calendar event.",
+			Description: "Delete a calendar event. Recurring events differ per provider. iCloud: an occurrence's uid is the series uid, so a delete of a recurring event is refused unless scope is given: \"series\" deletes the whole series, \"instance\" with recurrence_id from calendar_list_events deletes one occurrence. Google: each occurrence has its own uid and the delete removes only that occurrence; scope and recurrence_id are not accepted.",
 		},
 		withLog(log, "calendar_delete_event", func(ctx context.Context, _ *mcp.CallToolRequest, input deleteEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
@@ -226,7 +229,11 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			if err != nil {
 				return errResult(err), nil, nil
 			}
-			err = p.DeleteEvent(ctx, input.CalendarID, input.UID, input.ETag)
+			del, err := eventDeletionFromInput(input)
+			if err != nil {
+				return errResult(err), nil, nil
+			}
+			err = p.DeleteEvent(ctx, del)
 			auditLog(al, "calendar_delete_event", input.Provider, map[string]string{
 				"calendar_id": input.CalendarID,
 				"uid":         input.UID,
@@ -280,6 +287,10 @@ func parseAllDayDate(s string) (time.Time, error) {
 // end move together: a lone start or end would need the stored duration,
 // which the tool layer does not have.
 func eventPatchFromInput(input updateEventInput) (calendar.EventPatch, error) {
+	scope, err := calendar.ParseScope(input.Scope)
+	if err != nil {
+		return calendar.EventPatch{}, err
+	}
 	patch := calendar.EventPatch{
 		CalendarID:  input.CalendarID,
 		UID:         input.UID,
@@ -287,6 +298,7 @@ func eventPatchFromInput(input updateEventInput) (calendar.EventPatch, error) {
 		Description: input.Description,
 		Location:    input.Location,
 		ETag:        input.ETag,
+		Scope:       scope,
 	}
 	if (input.Start == nil) != (input.End == nil) {
 		return calendar.EventPatch{}, fmt.Errorf("start and end must be given together")
@@ -307,6 +319,28 @@ func eventPatchFromInput(input updateEventInput) (calendar.EventPatch, error) {
 	}
 	patch.Start, patch.End = &start, &end
 	return patch, nil
+}
+
+// eventDeletionFromInput turns the tool input into a domain deletion. The
+// recurrence_id is parsed here like every other time input; whether the
+// provider accepts it, and with which scope, is the provider's to decide.
+func eventDeletionFromInput(input deleteEventInput) (calendar.EventDeletion, error) {
+	scope, err := calendar.ParseScope(input.Scope)
+	if err != nil {
+		return calendar.EventDeletion{}, err
+	}
+	del := calendar.EventDeletion{
+		CalendarID: input.CalendarID,
+		UID:        input.UID,
+		ETag:       input.ETag,
+		Scope:      scope,
+	}
+	if input.RecurrenceID != "" {
+		if del.RecurrenceID, err = time.Parse(time.RFC3339, input.RecurrenceID); err != nil {
+			return calendar.EventDeletion{}, fmt.Errorf("invalid recurrence_id: %w", err)
+		}
+	}
+	return del, nil
 }
 
 // jsonResult serializes v as JSON text content.

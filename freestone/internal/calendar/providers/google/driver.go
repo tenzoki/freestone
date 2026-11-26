@@ -133,6 +133,9 @@ func (d *Driver) UpdateEvent(ctx context.Context, p domain.EventPatch) (*domain.
 	if p.UID == "" {
 		return nil, fmt.Errorf("google calendar: update requires uid")
 	}
+	if err := refuseScope(p.Scope, time.Time{}); err != nil {
+		return nil, fmt.Errorf("google calendar: update event %s: %w", p.UID, err)
+	}
 	allDay := false
 	if p.Start != nil || p.End != nil {
 		// The patch carries no all-day flag, and a dateTime sent to an
@@ -168,13 +171,27 @@ func (d *Driver) UpdateEvent(ctx context.Context, p domain.EventPatch) (*domain.
 
 // DeleteEvent removes an event from the given calendar. A non-empty etag
 // makes the delete conditional on it, as for UpdateEvent.
-func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, etag string) error {
-	call := d.svc.Events.Delete(calendarID, uid).Context(ctx)
-	setIfMatch(call.Header(), etag)
+func (d *Driver) DeleteEvent(ctx context.Context, del domain.EventDeletion) error {
+	if err := refuseScope(del.Scope, del.RecurrenceID); err != nil {
+		return fmt.Errorf("google calendar: delete event %s: %w", del.UID, err)
+	}
+	call := d.svc.Events.Delete(del.CalendarID, del.UID).Context(ctx)
+	setIfMatch(call.Header(), del.ETag)
 	if err := call.Do(); err != nil {
-		return fmt.Errorf("google calendar: delete event %s: %w", uid, conflictOr(err))
+		return fmt.Errorf("google calendar: delete event %s: %w", del.UID, conflictOr(err))
 	}
 	return nil
+}
+
+// refuseScope rejects a scope or recurrence ID: Google gives every
+// occurrence of a series its own event id, which calendar_list_events
+// returns as uid, so the uid alone already says what an update or delete
+// acts on. Accepting the iCloud inputs here would let them mean nothing.
+func refuseScope(scope domain.Scope, recurrenceID time.Time) error {
+	if scope == domain.ScopeUnspecified && recurrenceID.IsZero() {
+		return nil
+	}
+	return fmt.Errorf("scope and recurrence_id are not accepted for google: Google addresses each occurrence of a series by its own uid, as calendar_list_events returns it; pass that uid without scope or recurrence_id")
 }
 
 // setIfMatch makes a request conditional on etag, the domain's unquoted

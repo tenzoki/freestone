@@ -75,6 +75,7 @@ func expandSeries(master *ical.Component, base calendar.Event, overrides *overri
 		e.EndUTC = span.endOf(inst.In(dtstart.Location())).UTC()
 		e.RecurringParentUID = base.UID
 		e.InstanceStartUTC = instUTC
+		e.RecurrenceID = recurrenceIDOf(inst.In(dtstart.Location()))
 		if base.TZID != "" {
 			// Render in the series' own location; an RDATE may carry another.
 			e.StartLocal = instUTC.In(dtstart.Location()).Format(time.RFC3339)
@@ -92,6 +93,26 @@ func expandSeries(master *ical.Component, base calendar.Event, overrides *overri
 // place a series' instants are defined, so overrides, exclusions and extra
 // dates cannot disagree about which instants exist.
 func recurrenceSet(vevent *ical.Component, floating *time.Location) (*rrule.Set, time.Time, error) {
+	set, dtstart, err := generatedSet(vevent, floating)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	for _, p := range vevent.Props.Values(ical.PropExceptionDates) {
+		dates, err := parseDateTimeValues(&p, floating)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		for _, d := range dates {
+			set.ExDate(d)
+		}
+	}
+	return set, dtstart, nil
+}
+
+// generatedSet is the recurrence set before EXDATE removes anything: the
+// instants the series' DTSTART, RRULE and RDATEs generate. An EXDATE or a
+// RECURRENCE-ID is meaningful only if it names one of them.
+func generatedSet(vevent *ical.Component, floating *time.Location) (*rrule.Set, time.Time, error) {
 	dtstart, err := recurrenceStart(vevent, floating)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -125,16 +146,27 @@ func recurrenceSet(vevent *ical.Component, floating *time.Location) (*rrule.Set,
 			set.RDate(d)
 		}
 	}
-	for _, p := range vevent.Props.Values(ical.PropExceptionDates) {
-		dates, err := parseDateTimeValues(&p, floating)
-		if err != nil {
-			return nil, time.Time{}, err
+	return set, dtstart, nil
+}
+
+// maxOccurrenceScan bounds how many instants occursAt walks before it gives
+// up, so a rule with a tiny interval cannot stall a write.
+const maxOccurrenceScan = 100000
+
+// occursAt reports whether set generates the instant t. It walks the set's
+// iterator up to t, never Between(), which pre-allocates without bound.
+func occursAt(set *rrule.Set, t time.Time) (bool, error) {
+	next := set.Iterator()
+	for i := 0; i < maxOccurrenceScan; i++ {
+		inst, ok := next()
+		if !ok || inst.After(t) {
+			return false, nil
 		}
-		for _, d := range dates {
-			set.ExDate(d)
+		if inst.Equal(t) {
+			return true, nil
 		}
 	}
-	return set, dtstart, nil
+	return false, fmt.Errorf("more than %d occurrences before %s; cannot tell whether it is one", maxOccurrenceScan, t.Format(time.RFC3339))
 }
 
 // recurrenceStart returns the VEVENT's DTSTART in the event's own location.
