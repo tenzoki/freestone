@@ -1,6 +1,7 @@
 package google
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"net/mail"
@@ -15,13 +16,62 @@ import (
 
 // messageToSummary converts a Gmail metadata-format message to a domain MessageSummary.
 func messageToSummary(msg *gmail.Message) domain.MessageSummary {
+	s := summaryFromLabels(msg)
+	if msg.Payload != nil {
+		for _, h := range msg.Payload.Headers {
+			applySummaryHeader(&s, h.Name, h.Value)
+		}
+	}
+	fallBackToInternalDate(&s, msg)
+	return s
+}
+
+// messageFromRaw converts a Gmail raw-format message to a domain Message.
+// The raw bytes go through the shared rfc5322 decoder, so a Gmail message
+// decodes exactly as the same message fetched over IMAP would. A message
+// that cannot be decoded is an error, never an empty body.
+func messageFromRaw(msg *gmail.Message) (domain.Message, error) {
+	if msg.Raw == "" {
+		return domain.Message{}, fmt.Errorf("message %s: server returned no raw content", msg.Id)
+	}
+	data, err := decodeRaw(msg.Raw)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("message %s: decode raw field: %w", msg.Id, err)
+	}
+	body, err := rfc5322.Decode(bytes.NewReader(data))
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("message %s: %w", msg.Id, err)
+	}
+
+	s := summaryFromLabels(msg)
+	for name, value := range body.Headers {
+		applySummaryHeader(&s, name, value)
+	}
+	fallBackToInternalDate(&s, msg)
+
+	return domain.Message{
+		MessageSummary: s,
+		Headers:        body.Headers,
+		Text:           body.Text,
+		HTML:           body.HTML,
+		Warnings:       body.Warnings,
+	}, nil
+}
+
+// decodeRaw decodes Gmail's raw field. The API documents it as base64url;
+// whether it is padded is not specified, so both forms are accepted.
+func decodeRaw(s string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
+}
+
+// summaryFromLabels starts a summary from the fields Gmail reports outside
+// the message itself: id, size and labels (as flags and mailbox).
+func summaryFromLabels(msg *gmail.Message) domain.MessageSummary {
 	s := domain.MessageSummary{
 		Provider: "google",
 		ID:       msg.Id,
 		Size:     uint32(msg.SizeEstimate),
 	}
-
-	// Extract label-based flags.
 	for _, label := range msg.LabelIds {
 		s.Flags = append(s.Flags, label)
 		if label == "INBOX" && s.MailboxID == "" {
@@ -31,96 +81,30 @@ func messageToSummary(msg *gmail.Message) domain.MessageSummary {
 	if s.MailboxID == "" && len(msg.LabelIds) > 0 {
 		s.MailboxID = msg.LabelIds[0]
 	}
-
-	// Parse headers.
-	if msg.Payload != nil {
-		for _, h := range msg.Payload.Headers {
-			switch strings.ToLower(h.Name) {
-			case "subject":
-				s.Subject = h.Value
-			case "from":
-				s.From = h.Value
-			case "to":
-				s.To = splitAddresses(h.Value)
-			case "date":
-				if t, err := parseDate(h.Value); err == nil {
-					s.Date = t
-				}
-			}
-		}
-	}
-
-	// Fallback: use internalDate if no Date header parsed.
-	if s.Date.IsZero() && msg.InternalDate > 0 {
-		s.Date = time.UnixMilli(msg.InternalDate)
-	}
-
 	return s
 }
 
-// messageFromFull converts a Gmail full-format message to a domain Message.
-func messageFromFull(msg *gmail.Message) domain.Message {
-	m := domain.Message{
-		MessageSummary: messageToSummary(msg),
-		Headers:        make(map[string]string),
-	}
-
-	if msg.Payload != nil {
-		// Capture all headers.
-		for _, h := range msg.Payload.Headers {
-			m.Headers[h.Name] = h.Value
+// applySummaryHeader sets the summary field a header carries, if any.
+func applySummaryHeader(s *domain.MessageSummary, name, value string) {
+	switch strings.ToLower(name) {
+	case "subject":
+		s.Subject = value
+	case "from":
+		s.From = value
+	case "to":
+		s.To = splitAddresses(value)
+	case "date":
+		if t, err := parseDate(value); err == nil {
+			s.Date = t
 		}
-
-		// Extract body parts.
-		m.Text, m.HTML = extractBodyParts(msg.Payload)
 	}
-
-	return m
 }
 
-// extractBodyParts recursively extracts text/plain and text/html parts.
-func extractBodyParts(part *gmail.MessagePart) (text, html string) {
-	if part == nil {
-		return "", ""
+// fallBackToInternalDate uses Gmail's internalDate when no Date header parsed.
+func fallBackToInternalDate(s *domain.MessageSummary, msg *gmail.Message) {
+	if s.Date.IsZero() && msg.InternalDate > 0 {
+		s.Date = time.UnixMilli(msg.InternalDate)
 	}
-
-	mime := strings.ToLower(part.MimeType)
-
-	// Leaf node with body data.
-	if part.Body != nil && part.Body.Data != "" {
-		decoded := decodeBase64URL(part.Body.Data)
-		switch {
-		case mime == "text/plain" && text == "":
-			return decoded, ""
-		case mime == "text/html" && html == "":
-			return "", decoded
-		}
-	}
-
-	// Multipart: recurse into sub-parts.
-	for _, sub := range part.Parts {
-		t, h := extractBodyParts(sub)
-		if t != "" && text == "" {
-			text = t
-		}
-		if h != "" && html == "" {
-			html = h
-		}
-		if text != "" && html != "" {
-			break
-		}
-	}
-
-	return text, html
-}
-
-// decodeBase64URL decodes a base64url-encoded string (no padding).
-func decodeBase64URL(s string) string {
-	data, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(s)
-	if err != nil {
-		return ""
-	}
-	return string(data)
 }
 
 // splitAddresses parses an RFC 5322 address list header value.

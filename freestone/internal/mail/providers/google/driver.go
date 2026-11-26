@@ -106,17 +106,24 @@ func (d *Driver) ListMessages(ctx context.Context, q domain.MessageQuery) ([]dom
 	return summaries, nil
 }
 
-// GetMessage retrieves the full message content.
+// GetMessage retrieves the full message content. It fetches the raw RFC 5322
+// message rather than Gmail's pre-parsed "full" format, so the body is
+// decoded by the same codec as on every other provider: charsets are
+// converted, and parts "full" would only reference by attachment id are
+// present.
 func (d *Driver) GetMessage(ctx context.Context, _, id string) (*domain.Message, error) {
-	full, err := d.svc.Users.Messages.Get("me", id).
+	raw, err := d.svc.Users.Messages.Get("me", id).
 		Context(ctx).
-		Format("full").
+		Format("raw").
 		Do()
 	if err != nil {
 		return nil, fmt.Errorf("gmail: get message %s: %w", id, err)
 	}
 
-	msg := messageFromFull(full)
+	msg, err := messageFromRaw(raw)
+	if err != nil {
+		return nil, fmt.Errorf("gmail: %w", err)
+	}
 	return &msg, nil
 }
 

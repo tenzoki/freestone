@@ -121,48 +121,6 @@ func TestMessageToSummary_InternalDateFallback(t *testing.T) {
 	}
 }
 
-func TestExtractBodyParts_PlainText(t *testing.T) {
-	payload := &gmail.MessagePart{
-		MimeType: "text/plain",
-		Body: &gmail.MessagePartBody{
-			// "Hello World" in base64url no-padding
-			Data: "SGVsbG8gV29ybGQ",
-		},
-	}
-
-	text, html := extractBodyParts(payload)
-	if text != "Hello World" {
-		t.Errorf("text = %q, want 'Hello World'", text)
-	}
-	if html != "" {
-		t.Errorf("html = %q, want empty", html)
-	}
-}
-
-func TestExtractBodyParts_Multipart(t *testing.T) {
-	payload := &gmail.MessagePart{
-		MimeType: "multipart/alternative",
-		Parts: []*gmail.MessagePart{
-			{
-				MimeType: "text/plain",
-				Body:     &gmail.MessagePartBody{Data: "SGVsbG8"},
-			},
-			{
-				MimeType: "text/html",
-				Body:     &gmail.MessagePartBody{Data: "PGI-SGVsbG88L2I-"},
-			},
-		},
-	}
-
-	text, html := extractBodyParts(payload)
-	if text != "Hello" {
-		t.Errorf("text = %q, want 'Hello'", text)
-	}
-	if html == "" {
-		t.Error("expected non-empty html")
-	}
-}
-
 func TestSplitAddresses(t *testing.T) {
 	addrs := splitAddresses("alice@test.com, bob@test.com,  carol@test.com ")
 	if len(addrs) != 3 {
@@ -174,20 +132,5 @@ func TestSplitAddresses_Empty(t *testing.T) {
 	addrs := splitAddresses("")
 	if addrs != nil {
 		t.Errorf("expected nil, got %v", addrs)
-	}
-}
-
-func TestDecodeBase64URL(t *testing.T) {
-	// "Test data" in base64url no-padding
-	result := decodeBase64URL("VGVzdCBkYXRh")
-	if result != "Test data" {
-		t.Errorf("got %q, want 'Test data'", result)
-	}
-}
-
-func TestDecodeBase64URL_Invalid(t *testing.T) {
-	result := decodeBase64URL("!!!invalid!!!")
-	if result != "" {
-		t.Errorf("expected empty for invalid input, got %q", result)
 	}
 }
