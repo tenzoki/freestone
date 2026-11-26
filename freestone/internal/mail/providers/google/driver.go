@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"sync"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/gmail/v1"
@@ -90,18 +91,73 @@ func (d *Driver) ListMessages(ctx context.Context, q domain.MessageQuery) ([]dom
 		return nil, fmt.Errorf("gmail: list messages: %w", err)
 	}
 
-	summaries := make([]domain.MessageSummary, 0, len(resp.Messages))
-	for _, msg := range resp.Messages {
-		full, err := d.svc.Users.Messages.Get("me", msg.Id).
-			Context(ctx).
-			Format("metadata").
-			MetadataHeaders("Subject", "From", "To", "Date").
-			Do()
-		if err != nil {
-			return nil, fmt.Errorf("gmail: get message metadata %s: %w", msg.Id, err)
+	return d.fetchSummaries(ctx, resp.Messages)
+}
+
+// metadataWorkers bounds how many metadata requests ListMessages keeps in
+// flight. The list call returns ids only, so a 200-message listing needs 200
+// gets; issued one after another they alone can exhaust the tool timeout.
+const metadataWorkers = 8
+
+// fetchSummaries fetches the metadata of every listed message with at most
+// metadataWorkers requests in flight. The result keeps the list order, which
+// is Gmail's newest first. The first failure cancels the requests still
+// running and is the error returned: a listing with a hole in it would read
+// as complete.
+func (d *Driver) fetchSummaries(ctx context.Context, msgs []*gmail.Message) ([]domain.MessageSummary, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	summaries := make([]domain.MessageSummary, len(msgs))
+	sem := make(chan struct{}, metadataWorkers)
+	var (
+		wg       sync.WaitGroup
+		failOnce sync.Once
+		firstErr error
+		// stopped is set when the context ended before every message was
+		// dispatched, so some summaries were never fetched.
+		stopped bool
+	)
+	fail := func(err error) {
+		failOnce.Do(func() {
+			firstErr = err
+			cancel()
+		})
+	}
+
+dispatch:
+	for i, msg := range msgs {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			stopped = true
+			break dispatch
 		}
-		summary := messageToSummary(full)
-		summaries = append(summaries, summary)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			full, err := d.svc.Users.Messages.Get("me", msg.Id).
+				Context(ctx).
+				Format("metadata").
+				MetadataHeaders("Subject", "From", "To", "Date").
+				Do()
+			if err != nil {
+				fail(fmt.Errorf("gmail: get message metadata %s: %w", msg.Id, err))
+				return
+			}
+			summaries[i] = messageToSummary(full)
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	// The caller's context ended before every request was dispatched and
+	// no request failed, so the context is the reason the listing is short.
+	if stopped {
+		return nil, fmt.Errorf("gmail: get message metadata: %w", ctx.Err())
 	}
 	return summaries, nil
 }

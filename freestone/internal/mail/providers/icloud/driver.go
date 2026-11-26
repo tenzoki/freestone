@@ -3,6 +3,7 @@
 package icloud
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	netmail "net/mail"
+	"slices"
 	"strconv"
 	"time"
 
@@ -216,6 +218,8 @@ func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.
 		if limit > 200 {
 			limit = 200
 		}
+		// UIDs grow with arrival, so the highest are the newest: keep the
+		// newest limit messages.
 		if len(uids) > limit {
 			uids = uids[len(uids)-limit:]
 		}
@@ -231,6 +235,7 @@ func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.
 
 		fetchCmd := c.Fetch(uidSet, fetchOptions)
 
+		var fetched []uidSummary
 		for {
 			msgData := fetchCmd.Next()
 			if msgData == nil {
@@ -277,11 +282,19 @@ func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.
 			for _, f := range buf.Flags {
 				ms.Flags = append(ms.Flags, string(f))
 			}
-			result = append(result, ms)
+			fetched = append(fetched, uidSummary{uid: buf.UID, summary: ms})
 		}
 
 		if err := fetchCmd.Close(); err != nil {
 			return fmt.Errorf("icloud-mail: fetch: %w", err)
+		}
+
+		// Newest first, as Gmail lists. FETCH answers in mailbox order, which
+		// is oldest first, and the protocol does not promise even that.
+		slices.SortFunc(fetched, func(a, b uidSummary) int { return cmp.Compare(b.uid, a.uid) })
+		result = make([]mail.MessageSummary, len(fetched))
+		for i, f := range fetched {
+			result[i] = f.summary
 		}
 		return nil
 	})
@@ -289,6 +302,13 @@ func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.
 		return nil, err
 	}
 	return result, nil
+}
+
+// uidSummary pairs a fetched summary with its UID, the key ListMessages
+// orders by.
+type uidSummary struct {
+	uid     imap.UID
+	summary mail.MessageSummary
 }
 
 func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Message, error) {

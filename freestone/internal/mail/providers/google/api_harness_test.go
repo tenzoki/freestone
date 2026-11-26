@@ -67,6 +67,12 @@ type gmailAPIHarness struct {
 	mu       sync.Mutex
 	routes   map[string]apiResponse // key: "METHOD /path"
 	requests []apiRequest
+
+	// beforeRespond, when set, runs for every request after it is recorded
+	// and before its answer is written, on the server's goroutine for that
+	// request. Tests use it to hold requests open and observe concurrency.
+	// Set it before the driver issues its first request.
+	beforeRespond func(r *http.Request)
 }
 
 // newGmailAPIHarness starts a server with no routes; it is closed when the
@@ -152,7 +158,12 @@ func (h *gmailAPIHarness) serve(w http.ResponseWriter, r *http.Request) {
 		Body:   body,
 	})
 	resp, ok := h.routes[r.Method+" "+r.URL.Path]
+	hook := h.beforeRespond
 	h.mu.Unlock()
+
+	if hook != nil {
+		hook(r)
+	}
 
 	if !ok {
 		h.t.Errorf("harness: no route for %s %s", r.Method, r.URL.Path)
