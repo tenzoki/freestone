@@ -137,6 +137,34 @@ func domainToGoogle(e domain.Event) *calendar.Event {
 	return ge
 }
 
+// patchToGoogle builds the body of an Events.Patch call: only the fields the
+// patch sets. The client omits empty strings from JSON, so a field cleared
+// with "" is named in ForceSendFields to reach the server as "" and clear it.
+func patchToGoogle(p domain.EventPatch) *calendar.Event {
+	ge := &calendar.Event{}
+	setText := func(field string, v *string, dst *string) {
+		if v == nil {
+			return
+		}
+		*dst = *v
+		if *v == "" {
+			ge.ForceSendFields = append(ge.ForceSendFields, field)
+		}
+	}
+	setText("Summary", p.Summary, &ge.Summary)
+	setText("Description", p.Description, &ge.Description)
+	setText("Location", p.Location, &ge.Location)
+	// The instant keeps the offset the caller gave it. No timeZone is sent,
+	// so the patch does not name one for the event.
+	if p.Start != nil {
+		ge.Start = &calendar.EventDateTime{DateTime: p.Start.Format(time.RFC3339)}
+	}
+	if p.End != nil {
+		ge.End = &calendar.EventDateTime{DateTime: p.End.Format(time.RFC3339)}
+	}
+	return ge
+}
+
 // parseDateTimeField parses an RFC3339 dateTime string and an optional IANA
 // timezone. Returns the UTC time, the local RFC3339 representation, and the
 // TZID.

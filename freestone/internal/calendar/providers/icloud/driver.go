@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/emersion/go-webdav"
@@ -128,13 +129,9 @@ func (d *Driver) ListEvents(ctx context.Context, q calendar.EventQuery) ([]calen
 }
 
 func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*calendar.Event, error) {
-	path := calendarID + uid + ".ics"
-	obj, err := d.client.GetCalendarObject(ctx, path)
+	obj, err := d.loadObject(ctx, calendarID, uid)
 	if err != nil {
-		return nil, fmt.Errorf("icloud-calendar: get event %s: %w", uid, err)
-	}
-	if obj.Data == nil {
-		return nil, fmt.Errorf("icloud-calendar: event %s has no data", uid)
+		return nil, err
 	}
 	events, err := decodeEvents(obj.Data, obj.ETag, calendarID, time.Time{}, time.Time{}, d.log)
 	if err != nil {
@@ -144,6 +141,21 @@ func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*calenda
 		return nil, fmt.Errorf("icloud-calendar: no events decoded from %s", uid)
 	}
 	return &events[0], nil
+}
+
+// loadObject fetches the whole calendar object that holds the event uid.
+// It is the one place Get, Update and Delete find an event's object, and it
+// must always return the full object: Update edits it in place and writes
+// it back, so anything a partial fetch left out would be deleted.
+func (d *Driver) loadObject(ctx context.Context, calendarID, uid string) (*caldav.CalendarObject, error) {
+	obj, err := d.client.GetCalendarObject(ctx, eventObjectPath(calendarID, uid))
+	if err != nil {
+		return nil, fmt.Errorf("icloud-calendar: get event %s: %w", uid, err)
+	}
+	if obj.Data == nil {
+		return nil, fmt.Errorf("icloud-calendar: event %s has no data", uid)
+	}
+	return obj, nil
 }
 
 func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e calendar.Event) (*calendar.Event, error) {
@@ -167,35 +179,47 @@ func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e calendar.
 	return &e, nil
 }
 
-func (d *Driver) UpdateEvent(ctx context.Context, e calendar.Event) (*calendar.Event, error) {
-	if e.CalendarID == "" {
+// UpdateEvent applies the patch to the stored object rather than
+// re-encoding the event from the domain struct, and writes it back only if
+// it is still the version that was read.
+func (d *Driver) UpdateEvent(ctx context.Context, p calendar.EventPatch) (*calendar.Event, error) {
+	if p.CalendarID == "" {
 		return nil, fmt.Errorf("icloud-calendar: update requires calendar_id")
 	}
-	if e.UID == "" {
+	if p.UID == "" {
 		return nil, fmt.Errorf("icloud-calendar: update requires uid")
 	}
 
-	cal, _, err := encodeEvent(e)
+	obj, err := d.loadObject(ctx, p.CalendarID, p.UID)
 	if err != nil {
-		return nil, fmt.Errorf("icloud-calendar: encode event: %w", err)
+		return nil, err
+	}
+	master, err := applyPatch(obj.Data, p, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", p.UID, err)
 	}
 
-	path := eventObjectPath(e.CalendarID, e.UID)
-	obj, err := d.client.PutCalendarObject(ctx, path, cal, nil)
+	// go-webdav returns ETags unquoted and sends If-Match verbatim, so the
+	// entity tag is quoted here (RFC 9110 §8.8.3).
+	opts := &caldav.PutCalendarObjectOptions{IfMatch: webdav.ConditionalMatch(strconv.Quote(obj.ETag))}
+	put, err := d.client.PutCalendarObject(ctx, obj.Path, obj.Data, opts)
 	if err != nil {
-		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", e.UID, err)
+		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", p.UID, err)
 	}
 
-	e.Provider = "icloud"
-	if obj != nil {
-		e.ETag = obj.ETag
+	e, err := decodeVEvent(master, put.ETag, p.CalendarID)
+	if err != nil {
+		return nil, fmt.Errorf("icloud-calendar: decode updated event %s: %w", p.UID, err)
 	}
 	return &e, nil
 }
 
 func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, _ string) error {
-	path := eventObjectPath(calendarID, uid)
-	if err := d.client.RemoveAll(ctx, path, nil); err != nil {
+	obj, err := d.loadObject(ctx, calendarID, uid)
+	if err != nil {
+		return err
+	}
+	if err := d.client.RemoveAll(ctx, obj.Path, nil); err != nil {
 		return fmt.Errorf("icloud-calendar: delete event %s: %w", uid, err)
 	}
 	return nil

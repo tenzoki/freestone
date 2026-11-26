@@ -50,6 +50,24 @@ type EventQuery struct {
 	End        time.Time
 }
 
+// EventPatch names the fields of an existing event to change. A nil field
+// keeps the stored value; a pointer to "" clears a text field. Start and End
+// are given together or not at all. Providers apply the patch to the stored
+// event, so every property the domain does not model (recurrence, alarms,
+// attendee parameters, vendor extensions) survives an update.
+type EventPatch struct {
+	CalendarID  string
+	UID         string
+	Summary     *string
+	Description *string
+	Location    *string
+	Start       *time.Time
+	End         *time.Time
+	// ETag is the opaque entity tag, unquoted; "" means the caller asks for
+	// no conditional write of its own.
+	ETag string
+}
+
 // Provider defines the contract each calendar backend must implement.
 type Provider interface {
 	Name() string
@@ -58,7 +76,7 @@ type Provider interface {
 	GetEvent(ctx context.Context, calendarID, uid string) (*Event, error)
 	// Phase 2 write operations
 	CreateEvent(ctx context.Context, calendarID string, e Event) (*Event, error)
-	UpdateEvent(ctx context.Context, e Event) (*Event, error)
+	UpdateEvent(ctx context.Context, p EventPatch) (*Event, error)
 	DeleteEvent(ctx context.Context, calendarID, uid, etag string) error
 }
 

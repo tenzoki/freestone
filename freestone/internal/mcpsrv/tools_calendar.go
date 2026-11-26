@@ -43,16 +43,18 @@ type createEventInput struct {
 	AllDay      bool   `json:"all_day,omitempty" jsonschema:"True for all-day events"`
 }
 
+// updateEventInput uses pointers so that an omitted or null field can be
+// told apart from an empty string: nil keeps the stored value, "" clears it.
 type updateEventInput struct {
-	Provider    string `json:"provider" jsonschema:"Provider name (icloud or google)"`
-	CalendarID  string `json:"calendar_id" jsonschema:"Calendar ID"`
-	UID         string `json:"uid" jsonschema:"Event UID to update"`
-	Summary     string `json:"summary,omitempty" jsonschema:"Event title"`
-	Description string `json:"description,omitempty" jsonschema:"Event description"`
-	Location    string `json:"location,omitempty" jsonschema:"Event location"`
-	Start       string `json:"start,omitempty" jsonschema:"Start time in RFC3339 format"`
-	End         string `json:"end,omitempty" jsonschema:"End time in RFC3339 format"`
-	ETag        string `json:"etag,omitempty" jsonschema:"ETag for conflict detection (iCloud only)"`
+	Provider    string  `json:"provider" jsonschema:"Provider name (icloud or google)"`
+	CalendarID  string  `json:"calendar_id" jsonschema:"Calendar ID"`
+	UID         string  `json:"uid" jsonschema:"Event UID to update"`
+	Summary     *string `json:"summary,omitempty" jsonschema:"Event title. Omit or null keeps the current value, an empty string clears it."`
+	Description *string `json:"description,omitempty" jsonschema:"Event description. Omit or null keeps the current value, an empty string clears it."`
+	Location    *string `json:"location,omitempty" jsonschema:"Event location. Omit or null keeps the current value, an empty string clears it."`
+	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times."`
+	End         *string `json:"end,omitempty" jsonschema:"New end time in RFC3339 format, after start. Give start and end together, or neither to keep the current times."`
+	ETag        string  `json:"etag,omitempty" jsonschema:"ETag for conflict detection (iCloud only)"`
 }
 
 type deleteEventInput struct {
@@ -187,7 +189,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 	mcp.AddTool(srv,
 		&mcp.Tool{
 			Name:        "calendar_update_event",
-			Description: "Update an existing calendar event.",
+			Description: "Update an existing calendar event; only the fields you pass change. For summary, description and location: omit or null keeps the current value, an empty string clears it. Start and end are given together or not at all.",
 		},
 		withLog(log, "calendar_update_event", func(ctx context.Context, _ *mcp.CallToolRequest, input updateEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
@@ -196,29 +198,11 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			if err != nil {
 				return errResult(err), nil, nil
 			}
-			e := calendar.Event{
-				CalendarID:  input.CalendarID,
-				UID:         input.UID,
-				Summary:     input.Summary,
-				Description: input.Description,
-				Location:    input.Location,
-				ETag:        input.ETag,
+			patch, err := eventPatchFromInput(input)
+			if err != nil {
+				return errResult(err), nil, nil
 			}
-			if input.Start != "" {
-				start, parseErr := time.Parse(time.RFC3339, input.Start)
-				if parseErr != nil {
-					return errResult(fmt.Errorf("invalid start: %w", parseErr)), nil, nil
-				}
-				e.StartUTC = start.UTC()
-			}
-			if input.End != "" {
-				end, parseErr := time.Parse(time.RFC3339, input.End)
-				if parseErr != nil {
-					return errResult(fmt.Errorf("invalid end: %w", parseErr)), nil, nil
-				}
-				e.EndUTC = end.UTC()
-			}
-			updated, err := p.UpdateEvent(ctx, e)
+			updated, err := p.UpdateEvent(ctx, patch)
 			auditLog(al, "calendar_update_event", input.Provider, map[string]string{
 				"calendar_id": input.CalendarID,
 				"uid":         input.UID,
@@ -253,6 +237,39 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			return jsonResult(map[string]string{"status": "deleted", "uid": input.UID}), nil, nil
 		}),
 	)
+}
+
+// eventPatchFromInput turns the tool input into a domain patch. Start and
+// end move together: a lone start or end would need the stored duration,
+// which the tool layer does not have.
+func eventPatchFromInput(input updateEventInput) (calendar.EventPatch, error) {
+	patch := calendar.EventPatch{
+		CalendarID:  input.CalendarID,
+		UID:         input.UID,
+		Summary:     input.Summary,
+		Description: input.Description,
+		Location:    input.Location,
+		ETag:        input.ETag,
+	}
+	if (input.Start == nil) != (input.End == nil) {
+		return calendar.EventPatch{}, fmt.Errorf("start and end must be given together")
+	}
+	if input.Start == nil {
+		return patch, nil
+	}
+	start, err := time.Parse(time.RFC3339, *input.Start)
+	if err != nil {
+		return calendar.EventPatch{}, fmt.Errorf("invalid start: %w", err)
+	}
+	end, err := time.Parse(time.RFC3339, *input.End)
+	if err != nil {
+		return calendar.EventPatch{}, fmt.Errorf("invalid end: %w", err)
+	}
+	if !end.After(start) {
+		return calendar.EventPatch{}, fmt.Errorf("end %s must be after start %s", *input.End, *input.Start)
+	}
+	patch.Start, patch.End = &start, &end
+	return patch, nil
 }
 
 // jsonResult serializes v as JSON text content.

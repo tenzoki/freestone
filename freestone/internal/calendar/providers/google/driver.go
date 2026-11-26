@@ -110,27 +110,27 @@ func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e domain.Ev
 	return &result, nil
 }
 
-// UpdateEvent updates an existing event. The event's UID and CalendarID
-// must be set. Google Calendar does not use ETags for conflict detection
-// via this client, so the etag field in the domain Event is accepted but
-// not enforced.
-func (d *Driver) UpdateEvent(ctx context.Context, e domain.Event) (*domain.Event, error) {
-	if e.CalendarID == "" {
+// UpdateEvent applies the patch with Events.Patch, so Google changes only
+// the fields the patch sets and keeps everything else (recurrence,
+// reminders, attendees, conference data). Google Calendar does not use
+// ETags for conflict detection via this client, so the patch's ETag is
+// accepted but not enforced.
+func (d *Driver) UpdateEvent(ctx context.Context, p domain.EventPatch) (*domain.Event, error) {
+	if p.CalendarID == "" {
 		return nil, fmt.Errorf("google calendar: update requires calendar_id")
 	}
-	if e.UID == "" {
+	if p.UID == "" {
 		return nil, fmt.Errorf("google calendar: update requires uid")
 	}
-	ge := domainToGoogle(e)
-	updated, err := d.svc.Events.Update(e.CalendarID, e.UID, ge).Context(ctx).Do()
+	updated, err := d.svc.Events.Patch(p.CalendarID, p.UID, patchToGoogle(p)).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("google calendar: update event %s: %w", e.UID, err)
+		return nil, fmt.Errorf("google calendar: update event %s: %w", p.UID, err)
 	}
 	result, err := eventFromGoogle(updated)
 	if err != nil {
 		return nil, err
 	}
-	result.CalendarID = e.CalendarID
+	result.CalendarID = p.CalendarID
 	return &result, nil
 }
 

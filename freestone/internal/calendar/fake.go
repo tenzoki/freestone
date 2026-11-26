@@ -56,16 +56,35 @@ func (f *Fake) CreateEvent(_ context.Context, calendarID string, e Event) (*Even
 	return &e, nil
 }
 
-func (f *Fake) UpdateEvent(_ context.Context, e Event) (*Event, error) {
-	events := f.Events[e.CalendarID]
-	for i, existing := range events {
-		if existing.UID == e.UID {
-			e.Provider = f.ProviderName
-			f.Events[e.CalendarID][i] = e
-			return &e, nil
+// UpdateEvent applies the patch to the stored event, as the real providers
+// do: fields the patch leaves nil keep their stored value.
+func (f *Fake) UpdateEvent(_ context.Context, p EventPatch) (*Event, error) {
+	events := f.Events[p.CalendarID]
+	for i := range events {
+		if events[i].UID != p.UID {
+			continue
 		}
+		e := &events[i]
+		if p.Summary != nil {
+			e.Summary = *p.Summary
+		}
+		if p.Description != nil {
+			e.Description = *p.Description
+		}
+		if p.Location != nil {
+			e.Location = *p.Location
+		}
+		if p.Start != nil {
+			e.StartUTC = p.Start.UTC()
+		}
+		if p.End != nil {
+			e.EndUTC = p.End.UTC()
+		}
+		out := *e
+		out.Provider = f.ProviderName
+		return &out, nil
 	}
-	return nil, fmt.Errorf("fake: event %s not found", e.UID)
+	return nil, fmt.Errorf("fake: event %s not found", p.UID)
 }
 
 func (f *Fake) DeleteEvent(_ context.Context, calendarID, uid, _ string) error {
