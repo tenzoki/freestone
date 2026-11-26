@@ -26,12 +26,22 @@ func encodeEvent(e calendar.Event) (*ical.Calendar, string, error) {
 	vevent.Props.SetText(ical.PropUID, uid)
 	vevent.Props.SetText(ical.PropDateTimeStamp, time.Now().UTC().Format("20060102T150405Z"))
 
-	// DTSTART / DTEND in UTC
+	// An all-day event is a DATE pair with an exclusive DTEND (RFC 5545
+	// §3.6.1); the domain carries the date as UTC midnight. Timed events
+	// are written as UTC DATE-TIMEs. Neither goes through SetText, which
+	// would label the value VALUE=TEXT.
+	setTime := func(name string, t time.Time) {
+		if e.AllDay {
+			vevent.Props.SetDate(name, t.UTC())
+		} else {
+			vevent.Props.SetDateTime(name, t.UTC())
+		}
+	}
 	if !e.StartUTC.IsZero() {
-		vevent.Props.SetText(ical.PropDateTimeStart, e.StartUTC.UTC().Format("20060102T150405Z"))
+		setTime(ical.PropDateTimeStart, e.StartUTC)
 	}
 	if !e.EndUTC.IsZero() {
-		vevent.Props.SetText(ical.PropDateTimeEnd, e.EndUTC.UTC().Format("20060102T150405Z"))
+		setTime(ical.PropDateTimeEnd, e.EndUTC)
 	}
 
 	if e.Summary != "" {

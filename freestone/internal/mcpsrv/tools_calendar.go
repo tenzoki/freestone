@@ -38,9 +38,9 @@ type createEventInput struct {
 	Summary     string `json:"summary" jsonschema:"Event title"`
 	Description string `json:"description,omitempty" jsonschema:"Event description"`
 	Location    string `json:"location,omitempty" jsonschema:"Event location"`
-	Start       string `json:"start" jsonschema:"Start time in RFC3339 format"`
-	End         string `json:"end" jsonschema:"End time in RFC3339 format"`
-	AllDay      bool   `json:"all_day,omitempty" jsonschema:"True for all-day events"`
+	Start       string `json:"start" jsonschema:"Start time in RFC3339 format. For an all-day event, a date (YYYY-MM-DD) or RFC3339; the date is the one written, not converted to UTC."`
+	End         string `json:"end" jsonschema:"End time in RFC3339 format. For an all-day event, the day after the last day (exclusive), as a date (YYYY-MM-DD) or RFC3339; it must be after start."`
+	AllDay      bool   `json:"all_day,omitempty" jsonschema:"True for all-day events; start and end are then dates and end is exclusive."`
 }
 
 // updateEventInput uses pointers so that an omitted or null field can be
@@ -52,7 +52,7 @@ type updateEventInput struct {
 	Summary     *string `json:"summary,omitempty" jsonschema:"Event title. Omit or null keeps the current value, an empty string clears it."`
 	Description *string `json:"description,omitempty" jsonschema:"Event description. Omit or null keeps the current value, an empty string clears it."`
 	Location    *string `json:"location,omitempty" jsonschema:"Event location. Omit or null keeps the current value, an empty string clears it."`
-	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times."`
+	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times. On an iCloud all-day event only the date on this value's own wall clock is used."`
 	End         *string `json:"end,omitempty" jsonschema:"New end time in RFC3339 format, after start. Give start and end together, or neither to keep the current times."`
 	ETag        string  `json:"etag,omitempty" jsonschema:"ETag for conflict detection (iCloud only)"`
 }
@@ -153,7 +153,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 	mcp.AddTool(srv,
 		&mcp.Tool{
 			Name:        "calendar_create_event",
-			Description: "Create a new calendar event.",
+			Description: "Create a new calendar event. For an all-day event set all_day and give start and end as dates (YYYY-MM-DD); end is exclusive, so a one-day event on 2026-11-26 ends 2026-11-27.",
 		},
 		withLog(log, "calendar_create_event", func(ctx context.Context, _ *mcp.CallToolRequest, input createEventInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
@@ -162,20 +162,16 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			if err != nil {
 				return errResult(err), nil, nil
 			}
-			start, err := time.Parse(time.RFC3339, input.Start)
+			start, end, err := createEventTimes(input)
 			if err != nil {
-				return errResult(fmt.Errorf("invalid start: %w", err)), nil, nil
-			}
-			end, err := time.Parse(time.RFC3339, input.End)
-			if err != nil {
-				return errResult(fmt.Errorf("invalid end: %w", err)), nil, nil
+				return errResult(err), nil, nil
 			}
 			e := calendar.Event{
 				Summary:     input.Summary,
 				Description: input.Description,
 				Location:    input.Location,
-				StartUTC:    start.UTC(),
-				EndUTC:      end.UTC(),
+				StartUTC:    start,
+				EndUTC:      end,
 				AllDay:      input.AllDay,
 			}
 			created, err := p.CreateEvent(ctx, input.CalendarID, e)
@@ -241,6 +237,43 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			return jsonResult(map[string]string{"status": "deleted", "uid": input.UID}), nil, nil
 		}),
 	)
+}
+
+// createEventTimes parses the start and end of a new event. Timed events
+// become UTC instants. All-day events become UTC midnight of the date on
+// the caller's own wall clock, the convention both decoders use: converting
+// to UTC first would move 2026-11-26T00:00:00+01:00 to the 25th.
+func createEventTimes(input createEventInput) (start, end time.Time, err error) {
+	parse := func(s string) (time.Time, error) {
+		t, err := time.Parse(time.RFC3339, s)
+		return t.UTC(), err
+	}
+	if input.AllDay {
+		parse = parseAllDayDate
+	}
+	if start, err = parse(input.Start); err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid start: %w", err)
+	}
+	if end, err = parse(input.End); err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid end: %w", err)
+	}
+	if input.AllDay && !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("all-day end %s must be after start %s; end is exclusive, so a one-day event ends the next day", input.End, input.Start)
+	}
+	return start, end, nil
+}
+
+// parseAllDayDate accepts YYYY-MM-DD or RFC3339 and returns the date as UTC
+// midnight, taken from the input's own wall clock.
+func parseAllDayDate(s string) (time.Time, error) {
+	t, err := time.Parse(time.DateOnly, s)
+	if err != nil {
+		var rfcErr error
+		if t, rfcErr = time.Parse(time.RFC3339, s); rfcErr != nil {
+			return time.Time{}, fmt.Errorf("%q is neither YYYY-MM-DD nor RFC3339", s)
+		}
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
 }
 
 // eventPatchFromInput turns the tool input into a domain patch. Start and

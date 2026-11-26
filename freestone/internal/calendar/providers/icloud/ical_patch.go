@@ -25,7 +25,11 @@ func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time) (*ical
 	patchText(props, ical.PropDescription, p.Description)
 	patchText(props, ical.PropLocation, p.Location)
 
-	if p.Start != nil || p.End != nil {
+	if isAllDay(props) {
+		if err := patchDates(props, p.Start, p.End); err != nil {
+			return nil, err
+		}
+	} else if p.Start != nil || p.End != nil {
 		loc, err := startLocation(props)
 		if err != nil {
 			return nil, err
@@ -71,6 +75,38 @@ func patchText(props ical.Props, name string, v *string) {
 	default:
 		props.SetText(name, *v)
 	}
+}
+
+// isAllDay reports whether the stored DTSTART is a DATE, i.e. the event
+// is an all-day event and its times are written as dates.
+func isAllDay(props ical.Props) bool {
+	start := props.Get(ical.PropDateTimeStart)
+	return start != nil && start.Params.Get(ical.ParamValue) == string(ical.ValueDate)
+}
+
+// patchDates writes new times of an all-day event as DATE values. The date
+// is the one on the caller's own wall clock, not after conversion to UTC,
+// so 2026-11-26T00:00:00+01:00 stays the 26th. DTEND is exclusive and must
+// fall after DTSTART.
+func patchDates(props ical.Props, start, end *time.Time) error {
+	if start != nil && end != nil && !wallDate(*end).After(wallDate(*start)) {
+		return fmt.Errorf("all-day end date %s must be after start date %s",
+			end.Format(time.DateOnly), start.Format(time.DateOnly))
+	}
+	if start != nil {
+		props.SetDate(ical.PropDateTimeStart, wallDate(*start))
+	}
+	if end != nil {
+		// DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1).
+		props.Del(ical.PropDuration)
+		props.SetDate(ical.PropDateTimeEnd, wallDate(*end))
+	}
+	return nil
+}
+
+// wallDate is the calendar date of t in t's own location, as UTC midnight.
+func wallDate(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // startLocation is the zone new DTSTART/DTEND values are written in: the
