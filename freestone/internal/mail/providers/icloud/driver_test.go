@@ -87,17 +87,6 @@ func TestFormatAddress_WithoutName(t *testing.T) {
 	}
 }
 
-func TestDecodeBody_PlainText(t *testing.T) {
-	raw := "Content-Type: text/plain\r\n\r\nHello world"
-	text, html := decodeBody(strings.NewReader(raw))
-	if text != "Hello world" {
-		t.Errorf("text = %q, want %q", text, "Hello world")
-	}
-	if html != "" {
-		t.Errorf("html = %q, want empty", html)
-	}
-}
-
 // D2: fetching a message body must not mark it read. Only MarkRead sets \Seen.
 func TestGetMessage_LeavesSeenUnset(t *testing.T) {
 	h := newIMAPHarness(t)

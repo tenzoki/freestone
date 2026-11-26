@@ -3,8 +3,11 @@ package icloud
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -421,5 +424,102 @@ func TestIMAPHarness_Stall(t *testing.T) {
 	release()
 	if err := <-errc; err != nil {
 		t.Fatalf("ListMessages after release: %v", err)
+	}
+}
+
+// --- D4: charsets and encoded words ---
+
+// germanMessage is a German mail as Outlook and older clients send it: an
+// ISO-8859-1 quoted-printable body and RFC 2047 encoded words in the sender
+// name and subject. The subject is Windows-1252 on purpose: Go's
+// mime.WordDecoder handles ISO-8859-1 words by itself, so only a charset
+// beyond it shows whether the client's word decoder knows charsets.
+const germanMessage = "From: =?iso-8859-1?q?J=FCrgen?= <juergen@example.com>\r\n" +
+	"To: user@example.com\r\n" +
+	"Subject: =?windows-1252?q?Gr=FC=DFe_=80?=\r\n" +
+	"Date: Thu, 26 Nov 2026 09:00:00 +0000\r\n" +
+	"Message-ID: <german-1@example.com>\r\n" +
+	"MIME-Version: 1.0\r\n" +
+	"Content-Type: text/plain; charset=ISO-8859-1\r\n" +
+	"Content-Transfer-Encoding: quoted-printable\r\n" +
+	"\r\n" +
+	"Viele Gr=FC=DFe aus M=FCnchen\r\n"
+
+func TestIMAPHarness_GetMessage_DecodesCharsets(t *testing.T) {
+	h := newIMAPHarness(t)
+	uid := h.seed("INBOX", germanMessage)
+
+	msg, err := h.driver().GetMessage(context.Background(), "INBOX", strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if want := "Viele Grüße aus München\r\n"; msg.Text != want {
+		t.Errorf("Text = %q, want %q", msg.Text, want)
+	}
+	if msg.Subject != "Grüße €" {
+		t.Errorf("Subject = %q, want %q", msg.Subject, "Grüße €")
+	}
+	if msg.From != "Jürgen <juergen@example.com>" {
+		t.Errorf("From = %q, want %q", msg.From, "Jürgen <juergen@example.com>")
+	}
+	if got := msg.Headers["Message-ID"]; got != "<german-1@example.com>" {
+		t.Errorf("Headers[Message-ID] = %q, want <german-1@example.com>", got)
+	}
+	if len(msg.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none", msg.Warnings)
+	}
+}
+
+func TestIMAPHarness_ListMessages_DecodesEncodedWordSubject(t *testing.T) {
+	h := newIMAPHarness(t)
+	h.seed("INBOX", germanMessage)
+
+	msgs, err := h.driver().ListMessages(context.Background(), mail.MessageQuery{MailboxID: "INBOX"})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ListMessages = %+v, want 1 message", msgs)
+	}
+	if msgs[0].Subject != "Grüße €" {
+		t.Errorf("Subject = %q, want %q", msgs[0].Subject, "Grüße €")
+	}
+}
+
+func TestIMAPHarness_GetMessage_UnknownCharsetWarns(t *testing.T) {
+	h := newIMAPHarness(t)
+	raw := strings.Replace(smokeMessage, "charset=utf-8", "charset=x-unknown", 1)
+	uid := h.seed("INBOX", raw)
+
+	msg, err := h.driver().GetMessage(context.Background(), "INBOX", strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if !strings.Contains(msg.Text, "Body text.") {
+		t.Errorf("Text = %q, want the undecoded body", msg.Text)
+	}
+	if len(msg.Warnings) != 1 || !strings.Contains(msg.Warnings[0], "x-unknown") {
+		t.Errorf("Warnings = %v, want one naming x-unknown", msg.Warnings)
+	}
+	// warnings is part of the mail_get_message output.
+	out, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"warnings":[`) {
+		t.Errorf("JSON = %s, want a warnings field", out)
+	}
+}
+
+func TestIMAPHarness_GetMessage_UnparseableIsError(t *testing.T) {
+	h := newIMAPHarness(t)
+	uid := h.seed("INBOX", "Subject: broken\r\n"+
+		"Content-Type: multipart/mixed\r\n"+ // no boundary
+		"\r\n"+
+		"--x\r\nContent-Type: text/plain\r\n\r\nhi\r\n--x--\r\n")
+
+	msg, err := h.driver().GetMessage(context.Background(), "INBOX", strconv.FormatUint(uint64(uid), 10))
+	if err == nil {
+		t.Fatalf("GetMessage = %+v, nil error; want a decode error", msg)
 	}
 }

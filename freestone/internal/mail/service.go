@@ -40,6 +40,10 @@ type Message struct {
 	Headers map[string]string `json:"headers,omitempty"`
 	Text    string            `json:"text,omitempty"`
 	HTML    string            `json:"html,omitempty"`
+	// Warnings names each part of the message that could not be fully
+	// decoded (an unsupported charset, for instance) and is returned as
+	// received instead.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // MessageQuery specifies filters for listing messages.

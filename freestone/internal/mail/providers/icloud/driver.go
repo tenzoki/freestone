@@ -15,6 +15,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 
 	"github.com/kai/freestone/internal/mail"
+	"github.com/kai/freestone/internal/mail/rfc5322"
 )
 
 const imapDialTimeout = 30 * time.Second
@@ -74,7 +75,10 @@ func (d *Driver) connect(ctx context.Context) (*imapclient.Client, error) {
 		return nil, fmt.Errorf("icloud-mail: dial %s: %w", d.addr, err)
 	}
 
-	c := imapclient.New(conn, nil)
+	// The word decoder makes envelope subjects and address names in
+	// ISO-8859-1, Windows-1252 and other charsets arrive decoded; the
+	// library's default decodes UTF-8 and US-ASCII only.
+	c := imapclient.New(conn, &imapclient.Options{WordDecoder: rfc5322.WordDecoder()})
 
 	if err := c.Login(d.username, d.password).Wait(); err != nil {
 		c.Close()
@@ -291,9 +295,10 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (_ *mail.
 			MailboxID: mailboxID,
 			ID:        id,
 		},
-		Headers: make(map[string]string),
 	}
 
+	var gotBody bool
+	var decodeErr error
 	for {
 		item := msgData.Next()
 		if item == nil {
@@ -317,13 +322,33 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (_ *mail.
 		case imapclient.FetchItemDataRFC822Size:
 			msg.Size = uint32(data.Size)
 		case imapclient.FetchItemDataBodySection:
-			text, html := decodeBody(data.Literal)
-			msg.Text = text
-			msg.HTML = html
+			if data.Literal == nil {
+				continue
+			}
+			gotBody = true
+			body, err := rfc5322.Decode(data.Literal)
+			if err != nil {
+				decodeErr = fmt.Errorf("icloud-mail: decode message %s: %w", id, err)
+				continue
+			}
+			msg.Headers = body.Headers
+			msg.Text = body.Text
+			msg.HTML = body.HTML
+			msg.Warnings = body.Warnings
 		}
 	}
 
-	return msg, fetchCmd.Close()
+	// Close drains whatever a failed decode left unread.
+	if err := fetchCmd.Close(); err != nil {
+		return nil, fmt.Errorf("icloud-mail: fetch %s: %w", id, err)
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	if !gotBody {
+		return nil, fmt.Errorf("icloud-mail: message %s: server returned no body", id)
+	}
+	return msg, nil
 }
 
 func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (_ string, err error) {
