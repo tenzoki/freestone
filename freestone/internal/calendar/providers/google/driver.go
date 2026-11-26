@@ -4,11 +4,15 @@ package google
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
 	"time"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/calendar/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
 	domain "github.com/kai/freestone/internal/calendar"
@@ -119,9 +123,9 @@ func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e domain.Ev
 
 // UpdateEvent applies the patch with Events.Patch, so Google changes only
 // the fields the patch sets and keeps everything else (recurrence,
-// reminders, attendees, conference data). Google Calendar does not use
-// ETags for conflict detection via this client, so the patch's ETag is
-// accepted but not enforced.
+// reminders, attendees, conference data). A patch carrying an etag is
+// conditional: the PATCH sends it as If-Match, and Google's 412 becomes
+// domain.ErrConflict.
 func (d *Driver) UpdateEvent(ctx context.Context, p domain.EventPatch) (*domain.Event, error) {
 	if p.CalendarID == "" {
 		return nil, fmt.Errorf("google calendar: update requires calendar_id")
@@ -145,9 +149,14 @@ func (d *Driver) UpdateEvent(ctx context.Context, p domain.EventPatch) (*domain.
 	if err != nil {
 		return nil, fmt.Errorf("google calendar: update event %s: %w", p.UID, err)
 	}
-	updated, err := d.svc.Events.Patch(p.CalendarID, p.UID, body).Context(ctx).Do()
+	// The If-Match goes on the PATCH, not the read above: the read only
+	// learns how the event is dated, and the write is what must not
+	// overwrite a newer version.
+	call := d.svc.Events.Patch(p.CalendarID, p.UID, body).Context(ctx)
+	setIfMatch(call.Header(), p.ETag)
+	updated, err := call.Do()
 	if err != nil {
-		return nil, fmt.Errorf("google calendar: update event %s: %w", p.UID, err)
+		return nil, fmt.Errorf("google calendar: update event %s: %w", p.UID, conflictOr(err))
 	}
 	result, err := eventFromGoogle(updated)
 	if err != nil {
@@ -157,12 +166,32 @@ func (d *Driver) UpdateEvent(ctx context.Context, p domain.EventPatch) (*domain.
 	return &result, nil
 }
 
-// DeleteEvent removes an event from the given calendar.
-// The etag parameter is accepted for interface compatibility but is not
-// used by the Google Calendar API client.
-func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, _ string) error {
-	if err := d.svc.Events.Delete(calendarID, uid).Context(ctx).Do(); err != nil {
-		return fmt.Errorf("google calendar: delete event %s: %w", uid, err)
+// DeleteEvent removes an event from the given calendar. A non-empty etag
+// makes the delete conditional on it, as for UpdateEvent.
+func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, etag string) error {
+	call := d.svc.Events.Delete(calendarID, uid).Context(ctx)
+	setIfMatch(call.Header(), etag)
+	if err := call.Do(); err != nil {
+		return fmt.Errorf("google calendar: delete event %s: %w", uid, conflictOr(err))
 	}
 	return nil
+}
+
+// setIfMatch makes a request conditional on etag, the domain's unquoted
+// form, by sending it quoted as RFC 9110 §8.8.3 requires. An empty etag
+// leaves the request unconditional.
+func setIfMatch(h http.Header, etag string) {
+	if etag != "" {
+		h.Set("If-Match", strconv.Quote(etag))
+	}
+}
+
+// conflictOr turns Google's 412 Precondition Failed into
+// domain.ErrConflict and returns every other error unchanged.
+func conflictOr(err error) error {
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) && gerr.Code == http.StatusPreconditionFailed {
+		return fmt.Errorf("%w: %w", domain.ErrConflict, err)
+	}
+	return err
 }

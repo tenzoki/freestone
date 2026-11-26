@@ -2,6 +2,7 @@ package google
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,16 @@ func eventFromGoogle(item *calendar.Event) (domain.Event, error) {
 		Description: item.Description,
 		Location:    item.Location,
 		Status:      strings.ToUpper(item.Status),
+	}
+
+	// Google sends the entity tag quoted, as the HTTP header carries it;
+	// the domain holds it unquoted, as iCloud does.
+	if item.Etag != "" {
+		etag, err := strconv.Unquote(item.Etag)
+		if err != nil {
+			return domain.Event{}, fmt.Errorf("google calendar: event %s: etag %q is not a quoted string: %w", item.Id, item.Etag, err)
+		}
+		ev.ETag = etag
 	}
 
 	// Organizer is the address, as on iCloud and as the write path sends it;

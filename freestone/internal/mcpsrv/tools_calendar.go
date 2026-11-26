@@ -54,14 +54,14 @@ type updateEventInput struct {
 	Location    *string `json:"location,omitempty" jsonschema:"Event location. Omit or null keeps the current value, an empty string clears it."`
 	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times. On an all-day event (iCloud or Google) only the date on this value's own wall clock is used and the event stays all-day; end is then the exclusive end date and must fall on a later date."`
 	End         *string `json:"end,omitempty" jsonschema:"New end time in RFC3339 format, after start. Give start and end together, or neither to keep the current times."`
-	ETag        string  `json:"etag,omitempty" jsonschema:"ETag for conflict detection (iCloud only)"`
+	ETag        string  `json:"etag,omitempty" jsonschema:"The event's etag as last read, passed back exactly as received. When given, the update is made only if the event is unchanged since then; otherwise the call fails and the event must be re-fetched."`
 }
 
 type deleteEventInput struct {
 	Provider   string `json:"provider" jsonschema:"Provider name (icloud or google)"`
 	CalendarID string `json:"calendar_id" jsonschema:"Calendar ID"`
 	UID        string `json:"uid" jsonschema:"Event UID to delete"`
-	ETag       string `json:"etag,omitempty" jsonschema:"ETag for conflict detection (iCloud only)"`
+	ETag       string `json:"etag,omitempty" jsonschema:"The event's etag as last read, passed back exactly as received. When given, the delete is made only if the event is unchanged since then; otherwise the call fails and the event must be re-fetched."`
 }
 
 func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Logger, log *slog.Logger) {

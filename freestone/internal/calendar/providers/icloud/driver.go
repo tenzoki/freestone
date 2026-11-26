@@ -36,10 +36,10 @@ func New(ctx context.Context, endpoint, username, password string, floating *tim
 	if floating == nil {
 		return nil, fmt.Errorf("icloud-calendar: no location for floating times")
 	}
-	httpClient := webdav.HTTPClientWithBasicAuth(
+	httpClient := conflictDetector{next: webdav.HTTPClientWithBasicAuth(
 		&http.Client{Timeout: 30 * time.Second},
 		username, password,
-	)
+	)}
 	client, err := caldav.NewClient(httpClient, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("icloud-calendar: create client: %w", err)
@@ -56,6 +56,36 @@ func New(ctx context.Context, endpoint, username, password string, floating *tim
 	}
 
 	return &Driver{client: client, homeSet: homeSet, floating: floating, log: log}, nil
+}
+
+// conflictDetector turns a 412 Precondition Failed into calendar.ErrConflict.
+// go-webdav reports a non-2xx answer as its *internal.HTTPError, which
+// freestone cannot name in errors.As, but its client returns an error from
+// the HTTPClient unchanged, so the status is read here, before the library
+// sees it.
+type conflictDetector struct {
+	next webdav.HTTPClient
+}
+
+func (c conflictDetector) Do(req *http.Request) (*http.Response, error) {
+	resp, err := c.next.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusPreconditionFailed {
+		if err := resp.Body.Close(); err != nil {
+			return nil, fmt.Errorf("%w (HTTP 412 on %s %s; closing the body: %v)", calendar.ErrConflict, req.Method, req.URL.Path, err)
+		}
+		return nil, fmt.Errorf("%w (HTTP 412 on %s %s)", calendar.ErrConflict, req.Method, req.URL.Path)
+	}
+	return resp, nil
+}
+
+// ifMatch is the If-Match value for etag, the domain's unquoted form.
+// go-webdav returns ETags unquoted and sends If-Match verbatim, so the
+// entity tag is quoted here (RFC 9110 §8.8.3).
+func ifMatch(etag string) webdav.ConditionalMatch {
+	return webdav.ConditionalMatch(strconv.Quote(etag))
 }
 
 func (d *Driver) Name() string { return "icloud" }
@@ -248,7 +278,8 @@ func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e calendar.
 
 // UpdateEvent applies the patch to the stored object rather than
 // re-encoding the event from the domain struct, and writes it back only if
-// it is still the version that was read.
+// it is still the version that was read. A caller etag that is not the
+// stored object's is a conflict found before anything is written.
 func (d *Driver) UpdateEvent(ctx context.Context, p calendar.EventPatch) (*calendar.Event, error) {
 	if p.CalendarID == "" {
 		return nil, fmt.Errorf("icloud-calendar: update requires calendar_id")
@@ -261,14 +292,15 @@ func (d *Driver) UpdateEvent(ctx context.Context, p calendar.EventPatch) (*calen
 	if err != nil {
 		return nil, err
 	}
+	if p.ETag != "" && p.ETag != obj.ETag {
+		return nil, fmt.Errorf("icloud-calendar: update event %s: etag %q, stored %q: %w", p.UID, p.ETag, obj.ETag, calendar.ErrConflict)
+	}
 	master, err := applyPatch(obj.Data, p, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", p.UID, err)
 	}
 
-	// go-webdav returns ETags unquoted and sends If-Match verbatim, so the
-	// entity tag is quoted here (RFC 9110 §8.8.3).
-	opts := &caldav.PutCalendarObjectOptions{IfMatch: webdav.ConditionalMatch(strconv.Quote(obj.ETag))}
+	opts := &caldav.PutCalendarObjectOptions{IfMatch: ifMatch(obj.ETag)}
 	put, err := d.client.PutCalendarObject(ctx, obj.Path, obj.Data, opts)
 	if err != nil {
 		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", p.UID, err)
@@ -281,12 +313,18 @@ func (d *Driver) UpdateEvent(ctx context.Context, p calendar.EventPatch) (*calen
 	return &e, nil
 }
 
-func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, _ string) error {
+// DeleteEvent removes the object holding uid, conditional on the caller's
+// etag when one is given and otherwise on the version just resolved, so a
+// change made in between is never deleted unseen.
+func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, etag string) error {
 	obj, err := d.loadObject(ctx, calendarID, uid)
 	if err != nil {
 		return err
 	}
-	if err := d.client.RemoveAll(ctx, obj.Path, nil); err != nil {
+	if etag == "" {
+		etag = obj.ETag
+	}
+	if err := d.client.RemoveAll(ctx, obj.Path, &webdav.RemoveAllOptions{IfMatch: ifMatch(etag)}); err != nil {
 		return fmt.Errorf("icloud-calendar: delete event %s: %w", uid, err)
 	}
 	return nil

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -579,7 +580,8 @@ func harnessTime(s string) time.Time {
 // TestCalDAVHarness_ConditionalWrites pins the If-Match behaviour later
 // ETag tests depend on. go-webdav's client sends the ConditionalMatch
 // verbatim while CalendarObject.ETag comes back unquoted, so the caller
-// must quote it; an unquoted value is a 400, not a match.
+// must quote it; an unquoted value matches nothing. Every refusal is a 412,
+// which the driver's client reports as calendar.ErrConflict.
 func TestCalDAVHarness_ConditionalWrites(t *testing.T) {
 	h := newCalDAVHarness(t)
 	cal := h.addCalendar("personal", "Personal")
@@ -601,12 +603,12 @@ END:VCALENDAR
 	quoted := func(e string) webdav.ConditionalMatch { return webdav.ConditionalMatch(fmt.Sprintf("%q", e)) }
 
 	_, err := d.client.PutCalendarObject(ctx, href, stored.Data, &caldav.PutCalendarObjectOptions{IfMatch: quoted("stale")})
-	if err == nil || !strings.Contains(err.Error(), "412") {
-		t.Fatalf("PUT with stale If-Match: err = %v, want 412", err)
+	if !errors.Is(err, calendar.ErrConflict) {
+		t.Fatalf("PUT with stale If-Match: err = %v, want ErrConflict", err)
 	}
 	_, err = d.client.PutCalendarObject(ctx, href, stored.Data, &caldav.PutCalendarObjectOptions{IfMatch: webdav.ConditionalMatch(etag)})
-	if err == nil || !strings.Contains(err.Error(), "412") {
-		t.Fatalf("PUT with unquoted current If-Match: err = %v, want 412", err)
+	if !errors.Is(err, calendar.ErrConflict) {
+		t.Fatalf("PUT with unquoted current If-Match: err = %v, want ErrConflict", err)
 	}
 	put, err := d.client.PutCalendarObject(ctx, href, stored.Data, &caldav.PutCalendarObjectOptions{IfMatch: quoted(etag)})
 	if err != nil {
@@ -616,11 +618,11 @@ END:VCALENDAR
 		t.Errorf("ETag unchanged after write: %q", put.ETag)
 	}
 
-	if err := d.client.RemoveAll(ctx, href, &webdav.RemoveAllOptions{IfMatch: quoted(etag)}); err == nil || !strings.Contains(err.Error(), "412") {
-		t.Fatalf("DELETE with stale If-Match: err = %v, want 412", err)
+	if err := d.client.RemoveAll(ctx, href, &webdav.RemoveAllOptions{IfMatch: quoted(etag)}); !errors.Is(err, calendar.ErrConflict) {
+		t.Fatalf("DELETE with stale If-Match: err = %v, want ErrConflict", err)
 	}
-	if err := d.client.RemoveAll(ctx, href, &webdav.RemoveAllOptions{IfMatch: webdav.ConditionalMatch(put.ETag)}); err == nil || !strings.Contains(err.Error(), "412") {
-		t.Fatalf("DELETE with unquoted current If-Match: err = %v, want 412", err)
+	if err := d.client.RemoveAll(ctx, href, &webdav.RemoveAllOptions{IfMatch: webdav.ConditionalMatch(put.ETag)}); !errors.Is(err, calendar.ErrConflict) {
+		t.Fatalf("DELETE with unquoted current If-Match: err = %v, want ErrConflict", err)
 	}
 	if err := d.client.RemoveAll(ctx, href, &webdav.RemoveAllOptions{IfMatch: quoted(put.ETag)}); err != nil {
 		t.Fatalf("DELETE with current If-Match: %v", err)

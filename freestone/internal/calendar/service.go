@@ -4,14 +4,21 @@ package calendar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 )
 
+// ErrConflict reports that a conditional write was refused because the event
+// changed after the caller's etag was read. Every provider returns it, wrapped,
+// for a stale etag, so callers test it with errors.Is.
+var ErrConflict = errors.New("calendar: the event changed since its etag was read; re-fetch the event and retry with its current etag")
+
 // Event represents a single calendar event (possibly an expanded instance
-// of a recurring event).
+// of a recurring event). ETag is the opaque entity tag, unquoted, on every
+// provider; each driver quotes it at its own HTTP boundary.
 type Event struct {
 	Provider           string    `json:"provider"`
 	CalendarID         string    `json:"calendar_id"`
