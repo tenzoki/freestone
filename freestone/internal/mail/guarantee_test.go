@@ -18,6 +18,28 @@ package mail
 // flagged, whether or not it is the go-imap or Gmail method; selectors on an
 // imported package (io.Copy, slices.Delete) are exempt because those are
 // package functions, not mailbox operations.
+//
+// Outside MarkRead, the scan covers these ways of writing a non-peek fetch
+// section or a \Seen flag:
+//   - a section literal, named or with its type elided inside a slice, array
+//     or map literal ([]*imap.FetchItemBodySection{{}}), without Peek: true;
+//   - a zero-valued section: new(imap.FetchItemBodySection), a var
+//     declaration without a value, make([]imap.FetchItemBodySection, n);
+//   - an assignment to a field named Peek of anything but true;
+//   - imap.FlagSeen, or a string literal spelling \Seen in any case, other
+//     than as a SearchCriteria filter (\Deleted is flagged everywhere);
+//   - a mailbox opened by a two-argument .Select call whose options are not
+//     the literal &imap.SelectOptions{ReadOnly: true} (EXAMINE).
+//
+// What a syntactic scan cannot see: a section or flag built from values the
+// code does not spell (a string assembled at runtime, a flag read from
+// config, a section returned by another package or reached through
+// reflection), a zero section inside a struct field of a locally declared
+// type, or Peek cleared through a pointer to the field (p := &s.Peek). The
+// guarantee does not rest on the scan alone: the read paths open their
+// mailbox with EXAMINE, so the server refuses to set \Seen there, and
+// TestIMAPHarness_ReadPathsExamine and TestGetMessage_LeavesSeenUnset in
+// providers/icloud check that at runtime.
 
 import (
 	"fmt"
@@ -202,7 +224,16 @@ func (s *surfaceScanner) visit(n ast.Node) {
 				s.report(n, ".%s outside %s (%s)", name, markReadMethod, why)
 			}
 		}
+	case *ast.CallExpr:
+		s.checkCall(n)
+	case *ast.ValueSpec:
+		s.checkZeroSectionVar(n)
+	case *ast.AssignStmt:
+		s.checkPeekAssign(n)
+	case *ast.BasicLit:
+		s.checkFlagString(n)
 	case *ast.CompositeLit:
+		s.checkElidedSections(n)
 		p, name, ok := s.pkgSelector(n.Type)
 		if !ok {
 			return
@@ -283,6 +314,175 @@ func (s *surfaceScanner) checkPeek(lit *ast.CompositeLit, name string) {
 		break
 	}
 	s.report(lit, "imap.%s literal without Peek: true outside %s (a non-peek fetch sets \\Seen)", name, markReadMethod)
+}
+
+// sectionType reports whether e names imap.FetchItemBodySection or
+// imap.FetchItemBinarySection, returning the name.
+func (s *surfaceScanner) sectionType(e ast.Expr) (string, bool) {
+	p, name, ok := s.pkgSelector(e)
+	if !ok || p != imapImportPath || (name != "FetchItemBodySection" && name != "FetchItemBinarySection") {
+		return "", false
+	}
+	return name, true
+}
+
+// sectionElem reports whether e is a fetch section type or a pointer to one,
+// the element types a section slice, array or map can hold.
+func (s *surfaceScanner) sectionElem(e ast.Expr) (string, bool) {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	return s.sectionType(e)
+}
+
+// checkElidedSections checks the elements of a slice, array or map literal
+// whose element type is elided ([]*imap.FetchItemBodySection{{}}): those
+// inner literals have no Type of their own, so checkPeek would never see
+// them. Nested containers ([][]T{{{}}}) are followed down.
+func (s *surfaceScanner) checkElidedSections(lit *ast.CompositeLit) {
+	var elem ast.Expr
+	switch t := lit.Type.(type) {
+	case *ast.ArrayType:
+		elem = t.Elt
+	case *ast.MapType:
+		elem = t.Value
+	default:
+		return
+	}
+	s.checkElidedElems(lit.Elts, elem)
+}
+
+func (s *surfaceScanner) checkElidedElems(elts []ast.Expr, elem ast.Expr) {
+	for _, elt := range elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			elt = kv.Value // keyed slice/array element or map value
+		}
+		inner, ok := elt.(*ast.CompositeLit)
+		if !ok || inner.Type != nil {
+			continue // a named literal is checked on its own visit
+		}
+		if name, ok := s.sectionElem(elem); ok {
+			s.checkPeek(inner, name)
+			continue
+		}
+		switch t := elem.(type) {
+		case *ast.ArrayType:
+			s.checkElidedElems(inner.Elts, t.Elt)
+		case *ast.MapType:
+			s.checkElidedElems(inner.Elts, t.Value)
+		}
+	}
+}
+
+// checkCall flags new and make calls that produce zero-valued fetch
+// sections, whose Peek is false, and a mailbox opened read-write.
+func (s *surfaceScanner) checkCall(call *ast.CallExpr) {
+	if s.inMarkRead() {
+		return
+	}
+	if fn, ok := call.Fun.(*ast.Ident); ok && len(call.Args) > 0 {
+		switch fn.Name {
+		case "new":
+			if name, ok := s.sectionType(call.Args[0]); ok {
+				s.report(call, "new(imap.%s) outside %s (a zero section has Peek: false and sets \\Seen)", name, markReadMethod)
+			}
+		case "make":
+			if arr, ok := call.Args[0].(*ast.ArrayType); ok {
+				if name, ok := s.sectionType(arr.Elt); ok {
+					s.report(call, "make([]imap.%s) outside %s (zero sections have Peek: false and set \\Seen)", name, markReadMethod)
+				}
+			}
+		}
+		return
+	}
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Select" && len(call.Args) == 2 {
+		if !s.isExamineOptions(call.Args[1]) {
+			s.report(call, ".Select outside %s without &imap.SelectOptions{ReadOnly: true} (a read path must EXAMINE)", markReadMethod)
+		}
+	}
+}
+
+// isExamineOptions reports whether e is the literal
+// &imap.SelectOptions{ReadOnly: true}, the only read-only spelling accepted.
+func (s *surfaceScanner) isExamineOptions(e ast.Expr) bool {
+	addr, ok := e.(*ast.UnaryExpr)
+	if !ok || addr.Op != token.AND {
+		return false
+	}
+	lit, ok := addr.X.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	if p, name, ok := s.pkgSelector(lit.Type); !ok || p != imapImportPath || name != "SelectOptions" {
+		return false
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "ReadOnly" {
+			val, ok := kv.Value.(*ast.Ident)
+			return ok && val.Name == "true"
+		}
+	}
+	return false
+}
+
+// checkZeroSectionVar flags var s imap.FetchItemBodySection (and arrays of
+// sections) declared without a value: the zero value has Peek: false.
+func (s *surfaceScanner) checkZeroSectionVar(spec *ast.ValueSpec) {
+	if len(spec.Values) > 0 || spec.Type == nil || s.inMarkRead() {
+		return
+	}
+	t := spec.Type
+	if arr, ok := t.(*ast.ArrayType); ok && arr.Len != nil {
+		t = arr.Elt // [n]T holds n zero sections; []T is nil and holds none
+	}
+	if name, ok := s.sectionType(t); ok {
+		s.report(spec, "zero-valued imap.%s declared outside %s (Peek: false sets \\Seen)", name, markReadMethod)
+	}
+}
+
+// checkPeekAssign requires every assignment to a field named Peek outside
+// MarkRead to assign the literal true.
+func (s *surfaceScanner) checkPeekAssign(as *ast.AssignStmt) {
+	if s.inMarkRead() {
+		return
+	}
+	for i, lhs := range as.Lhs {
+		sel, ok := lhs.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Peek" {
+			continue
+		}
+		if len(as.Rhs) == len(as.Lhs) {
+			if val, ok := as.Rhs[i].(*ast.Ident); ok && val.Name == "true" {
+				continue
+			}
+		}
+		s.report(lhs, ".Peek assigned something other than true outside %s (a non-peek fetch sets \\Seen)", markReadMethod)
+	}
+}
+
+// checkFlagString applies the imap.FlagSeen and imap.FlagDeleted rules to
+// flags spelled as string literals ("\\Seen"). IMAP flags are
+// case-insensitive, so the comparison is too.
+func (s *surfaceScanner) checkFlagString(lit *ast.BasicLit) {
+	if lit.Kind != token.STRING {
+		return
+	}
+	v, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return // unreachable for a file go/parser accepted
+	}
+	switch {
+	case strings.EqualFold(v, `\Deleted`):
+		s.report(lit, "flag string %s (marks a message for expunge)", lit.Value)
+	case strings.EqualFold(v, `\Seen`):
+		if !s.inMarkRead() && !s.inSearchCriterion() {
+			s.report(lit, "flag string %s outside %s and outside a search criterion", lit.Value, markReadMethod)
+		}
+	}
 }
 
 // checkStoreFlags allows exactly {Op: imap.StoreFlagsAdd, Flags: {imap.FlagSeen}},
@@ -473,6 +673,48 @@ func (d *D) GetMessage() { _ = &imap.FetchItemBodySection{Peek: peek} }`, "Fetch
 func f() { _ = &imap.FetchItemBinarySection{Part: []int{1}} }`, "FetchItemBinarySection literal without Peek: true"},
 		{"aliased import does not hide a non-peek fetch", `
 func f() { _ = &goimap.FetchItemBodySection{} }`, "FetchItemBodySection literal without Peek: true"},
+		{"elided body section with Peek is allowed", `
+func (d *D) GetMessage() { _ = &imap.FetchOptions{BodySection: []*imap.FetchItemBodySection{{Peek: true}}} }`, ""},
+		{"Peek assigned true is allowed", `
+func (d *D) GetMessage() { s := &imap.FetchItemBodySection{Peek: true}; s.Peek = true }`, ""},
+		{"EXAMINE is allowed", `
+func (d *D) GetMessage() { c.Select("INBOX", &imap.SelectOptions{ReadOnly: true}) }`, ""},
+		{"SELECT inside MarkRead is allowed", `
+func (d *D) MarkRead() { c.Select("INBOX", nil) }`, ""},
+		{"\\Seen string as a search filter is allowed", `
+func f() { criteria.NotFlag = append(criteria.NotFlag, imap.Flag("\\Seen")) }`, ""},
+
+		{"elided body section without Peek", `
+func (d *D) GetMessage() { _ = &imap.FetchOptions{BodySection: []*imap.FetchItemBodySection{{}}} }`, "FetchItemBodySection literal without Peek: true"},
+		{"elided binary section in an array without Peek", `
+func f() { _ = [1]imap.FetchItemBinarySection{{Part: []int{1}}} }`, "FetchItemBinarySection literal without Peek: true"},
+		{"elided section as a map value without Peek", `
+func f() { _ = map[string]*imap.FetchItemBodySection{"all": {}} }`, "FetchItemBodySection literal without Peek: true"},
+		{"elided section in a nested slice without Peek", `
+func f() { _ = [][]*imap.FetchItemBodySection{{{Peek: false}}} }`, "FetchItemBodySection literal without Peek: true"},
+		{"new body section", `
+func (d *D) GetMessage() { s := new(imap.FetchItemBodySection); _ = s }`, "new(imap.FetchItemBodySection)"},
+		{"make of body sections", `
+func f() { _ = make([]imap.FetchItemBodySection, 1) }`, "make([]imap.FetchItemBodySection)"},
+		{"zero-valued section var", `
+func (d *D) GetMessage() { var s imap.FetchItemBodySection; _ = &s }`, "zero-valued imap.FetchItemBodySection"},
+		{"zero-valued section array var", `
+func f() { var s [2]imap.FetchItemBinarySection; _ = s }`, "zero-valued imap.FetchItemBinarySection"},
+		{"Peek cleared after a peek literal", `
+func (d *D) GetMessage() { s := &imap.FetchItemBodySection{Peek: true}; s.Peek = false }`, ".Peek assigned something other than true"},
+		{"Peek assigned from a variable", `
+func f() { s.Peek = peek }`, ".Peek assigned something other than true"},
+		{"\\Seen as a string on append", `
+func f() { c.Append("Drafts", n, &imap.AppendOptions{Flags: []imap.Flag{"\\Seen"}}) }`, "flag string"},
+		{"\\Seen as a raw string in another case", "\nfunc f() { _ = []imap.Flag{`\\SEEN`} }", "flag string"},
+		{"\\Deleted as a string", `
+func f() { _ = imap.Flag("\\Deleted") }`, "flag string"},
+		{"SELECT outside MarkRead", `
+func (d *D) GetMessage() { c.Select("INBOX", nil) }`, ".Select outside MarkRead"},
+		{"SELECT with ReadOnly from a variable", `
+func (d *D) GetMessage() { c.Select("INBOX", &imap.SelectOptions{ReadOnly: ro}) }`, ".Select outside MarkRead"},
+		{"SELECT with options from a variable", `
+func (d *D) GetMessage() { c.Select("INBOX", opts) }`, ".Select outside MarkRead"},
 		{"IMAP move", `func f() { c.Move(uids, "Trash") }`, ".Move"},
 		{"IMAP copy", `func f() { c.Copy(uids, "Trash") }`, ".Copy"},
 		{"IMAP expunge", `func f() { c.Expunge() }`, ".Expunge"},

@@ -213,3 +213,77 @@ func TestDecode_UnparseableIsError(t *testing.T) {
 		})
 	}
 }
+
+func TestDecode_MalformedContentTypeSinglePartReadsAsTextAndWarns(t *testing.T) {
+	// The unterminated quote makes the header unparseable (RFC 2045 5.2
+	// default: text/plain).
+	raw := "Content-Type: text/plain; charset=\"utf-8\r\n" +
+		"\r\n" +
+		"broken ct"
+
+	b := decode(t, raw)
+	if b.Text != "broken ct" {
+		t.Errorf("Text = %q, want %q", b.Text, "broken ct")
+	}
+	if len(b.Warnings) != 1 {
+		t.Fatalf("Warnings = %v, want exactly one", b.Warnings)
+	}
+	if w := b.Warnings[0]; !strings.Contains(w, "message body") || !strings.Contains(w, "Content-Type") {
+		t.Errorf("warning = %q, want it to name the message body and its Content-Type", w)
+	}
+}
+
+func TestDecode_MalformedContentTypeAfterTextPartIsNamed(t *testing.T) {
+	raw := "Content-Type: multipart/alternative; boundary=b1\r\n" +
+		"\r\n" +
+		"--b1\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		"plain body\r\n" +
+		"--b1\r\n" +
+		"Content-Type: text/html; charset=\"utf-8\r\n" +
+		"\r\n" +
+		"<p>lost</p>\r\n" +
+		"--b1--\r\n"
+
+	b := decode(t, raw)
+	if b.Text != "plain body" {
+		t.Errorf("Text = %q, want %q", b.Text, "plain body")
+	}
+	if len(b.Warnings) != 1 || !strings.Contains(b.Warnings[0], "part 2") {
+		t.Errorf("Warnings = %v, want one naming part 2", b.Warnings)
+	}
+}
+
+func TestDecode_MalformedMultipartContentTypeIsError(t *testing.T) {
+	raw := "Content-Type: multipart/mixed; boundary=\"b1\r\n" +
+		"\r\n" +
+		"--b1\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b1--\r\n"
+
+	if b, err := Decode(strings.NewReader(raw)); err == nil {
+		t.Fatalf("Decode = %+v, nil error; want an error", b)
+	}
+}
+
+func TestDecode_MalformedContentDispositionIsSkippedAndWarns(t *testing.T) {
+	raw := "Content-Type: multipart/mixed; boundary=b1\r\n" +
+		"\r\n" +
+		"--b1\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"Content-Disposition: attachment; filename=\"notes.txt\r\n" +
+		"\r\n" +
+		"attached\r\n" +
+		"--b1\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		"inline body\r\n" +
+		"--b1--\r\n"
+
+	b := decode(t, raw)
+	if b.Text != "inline body" {
+		t.Errorf("Text = %q, want the inline part", b.Text)
+	}
+	if len(b.Warnings) != 1 || !strings.Contains(b.Warnings[0], "part 1") || !strings.Contains(b.Warnings[0], "Content-Disposition") {
+		t.Errorf("Warnings = %v, want one naming part 1 and its Content-Disposition", b.Warnings)
+	}
+}

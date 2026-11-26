@@ -76,7 +76,36 @@ type imapHarness struct {
 
 	mu     sync.Mutex
 	stalls map[string]*stallGate
-	done   chan struct{} // closed at cleanup; unblocks every stalled command
+	// opens records every mailbox the driver opened, in order, and how.
+	opens []mailboxOpen
+	done  chan struct{} // closed at cleanup; unblocks every stalled command
+}
+
+// mailboxOpen is one SELECT or EXAMINE the driver sent.
+type mailboxOpen struct {
+	Mailbox  string
+	ReadOnly bool // true for EXAMINE
+}
+
+// readWriteOpens returns the mailboxes the driver opened with SELECT, not
+// EXAMINE. The inspector's opens are not recorded.
+func (h *imapHarness) readWriteOpens() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []string
+	for _, o := range h.opens {
+		if !o.ReadOnly {
+			out = append(out, o.Mailbox)
+		}
+	}
+	return out
+}
+
+// openCount returns how many mailboxes the driver opened, either way.
+func (h *imapHarness) openCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.opens)
 }
 
 // newIMAPHarness starts the server; it is shut down when the test ends.
@@ -309,6 +338,11 @@ func (s *harnessSession) Status(mailbox string, options *imap.StatusOptions) (*i
 
 func (s *harnessSession) Select(mailbox string, options *imap.SelectOptions) (*imap.SelectData, error) {
 	s.gate(opSelect)
+	if !s.inspector {
+		s.h.mu.Lock()
+		s.h.opens = append(s.h.opens, mailboxOpen{Mailbox: mailbox, ReadOnly: options != nil && options.ReadOnly})
+		s.h.mu.Unlock()
+	}
 	return s.SessionIMAP4rev2.Select(mailbox, options)
 }
 
@@ -531,5 +565,64 @@ func TestIMAPHarness_GetMessage_UnparseableIsError(t *testing.T) {
 	msg, err := h.driver().GetMessage(context.Background(), "INBOX", strconv.FormatUint(uint64(uid), 10))
 	if err == nil {
 		t.Fatalf("GetMessage = %+v, nil error; want a decode error", msg)
+	}
+}
+
+// --- read paths open read-only ---
+
+// TestIMAPHarness_ReadPathsExamine pins the server-side half of the
+// read-never-sets-flags guarantee: every driver path that only reads opens
+// its mailbox with EXAMINE, so a fetch that forgot BODY.PEEK still cannot set
+// \Seen on a real server. (imapmemserver does not enforce read-only mode, so
+// the harness records how each mailbox was opened instead of relying on the
+// flags afterwards.) MarkRead is the one path that needs SELECT; it runs last
+// to prove the recorder sees a read-write open when there is one.
+func TestIMAPHarness_ReadPathsExamine(t *testing.T) {
+	readPaths := []struct {
+		name string
+		run  func(d *Driver, uid string) error
+	}{
+		{"ListMessages", func(d *Driver, _ string) error {
+			_, err := d.ListMessages(context.Background(), mail.MessageQuery{MailboxID: "INBOX"})
+			return err
+		}},
+		{"GetMessage", func(d *Driver, uid string) error {
+			_, err := d.GetMessage(context.Background(), "INBOX", uid)
+			return err
+		}},
+		{"SaveDraftReply reading its parent", func(d *Driver, uid string) error {
+			_, err := d.SaveDraftReply(context.Background(), mail.DraftReply{
+				InReplyToMailboxID: "INBOX",
+				InReplyToID:        uid,
+				To:                 []string{"alice@example.com"},
+				Subject:            "Re: Hello harness",
+				BodyText:           "Thanks.",
+			})
+			return err
+		}},
+	}
+	for _, rp := range readPaths {
+		t.Run(rp.name, func(t *testing.T) {
+			h := newIMAPHarness(t)
+			uid := strconv.FormatUint(uint64(h.seed("INBOX", smokeMessage)), 10)
+			d := h.driver()
+
+			if err := rp.run(d, uid); err != nil {
+				t.Fatalf("%s: %v", rp.name, err)
+			}
+			if h.openCount() == 0 {
+				t.Fatalf("%s opened no mailbox; the recorder saw nothing", rp.name)
+			}
+			if rw := h.readWriteOpens(); len(rw) != 0 {
+				t.Fatalf("%s opened %v with SELECT; a read path must EXAMINE", rp.name, rw)
+			}
+
+			if err := d.MarkRead(context.Background(), "INBOX", uid); err != nil {
+				t.Fatalf("MarkRead: %v", err)
+			}
+			if rw := h.readWriteOpens(); !slices.Equal(rw, []string{"INBOX"}) {
+				t.Fatalf("read-write opens after MarkRead = %v, want [INBOX]", rw)
+			}
+		})
 	}
 }

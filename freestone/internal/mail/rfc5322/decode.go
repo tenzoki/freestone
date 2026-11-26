@@ -26,7 +26,8 @@ type Body struct {
 	Text    string
 	HTML    string
 	// Warnings names each part of the returned content that could not be
-	// fully decoded and was returned as it stood on the wire instead.
+	// fully decoded and was returned as it stood on the wire instead, and
+	// each part left out because its MIME headers could not be parsed.
 	Warnings []string
 }
 
@@ -38,9 +39,10 @@ func WordDecoder() *mime.WordDecoder {
 
 // Decode parses a raw RFC 5322 message. The first inline text/plain and the
 // first inline text/html part become Text and HTML. A part whose charset or
-// transfer encoding is unknown is kept as received and named in Warnings. A
-// message whose header or MIME structure cannot be parsed is an error, never
-// an empty body.
+// transfer encoding is unknown is kept as received and named in Warnings, and
+// so is a part whose Content-Type cannot be parsed, which is read as
+// text/plain. A message whose header or MIME structure cannot be parsed is an
+// error, never an empty body.
 func Decode(r io.Reader) (Body, error) {
 	root, err := message.Read(r)
 	if err != nil && !isRecoverable(err) {
@@ -77,10 +79,32 @@ func (b *Body) collect(path []int, part *message.Entity, partErr error) error {
 		return fmt.Errorf("%s: %w", partName(path), partErr)
 	}
 
-	mediaType, params, _ := part.Header.ContentType()
-	disposition, _, _ := part.Header.ContentDisposition()
-	if disposition == "attachment" {
-		return nil
+	mediaType, params, ctErr := part.Header.ContentType()
+	if ctErr != nil {
+		rawType := part.Header.Get("Content-Type")
+		// A multipart container whose header does not parse has no usable
+		// boundary, so none of its parts can be found: no body to return.
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawType)), "multipart/") {
+			return fmt.Errorf("%s: Content-Type %q cannot be parsed: %w", partName(path), rawType, ctErr)
+		}
+		// RFC 2045 5.2: any other Content-Type that cannot be parsed is read
+		// as the default, text/plain. Its charset parameter is lost with it,
+		// so the text comes back as the bytes on the wire.
+		mediaType, params = "text/plain", nil
+	}
+	if rawDisposition := part.Header.Get("Content-Disposition"); rawDisposition != "" {
+		// ContentDisposition reports an absent header as an error too, so
+		// it is asked only when the header is there.
+		disposition, _, err := part.Header.ContentDisposition()
+		if err != nil {
+			// RFC 2183 2.8: an unrecognised disposition is treated as
+			// attachment, so a part that may be a file never becomes the body.
+			b.Warnings = append(b.Warnings, fmt.Sprintf("%s: Content-Disposition %q cannot be parsed (%v); part treated as an attachment and skipped", partName(path), rawDisposition, err))
+			return nil
+		}
+		if disposition == "attachment" {
+			return nil
+		}
 	}
 
 	var dst *string
@@ -90,6 +114,9 @@ func (b *Body) collect(path []int, part *message.Entity, partErr error) error {
 	case mediaType == "text/html" && b.HTML == "":
 		dst = &b.HTML
 	default:
+		if ctErr != nil {
+			b.Warnings = append(b.Warnings, fmt.Sprintf("%s: Content-Type %q cannot be parsed (%v); part skipped, the message already has a text/plain body", partName(path), part.Header.Get("Content-Type"), ctErr))
+		}
 		return nil
 	}
 
@@ -102,6 +129,9 @@ func (b *Body) collect(path []int, part *message.Entity, partErr error) error {
 	}
 	*dst = string(content)
 
+	if ctErr != nil {
+		b.Warnings = append(b.Warnings, fmt.Sprintf("%s: Content-Type %q cannot be parsed (%v); read as text/plain, text returned undecoded", partName(path), part.Header.Get("Content-Type"), ctErr))
+	}
 	switch {
 	case message.IsUnknownCharset(partErr):
 		b.Warnings = append(b.Warnings, fmt.Sprintf("%s (%s): charset %q not supported; text returned undecoded", partName(path), mediaType, params["charset"]))

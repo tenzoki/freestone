@@ -196,8 +196,10 @@ func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.
 
 	var result []mail.MessageSummary
 	err := d.session(ctx, "list messages", func(c *imapclient.Client) error {
-		if _, err := c.Select(mboxID, nil).Wait(); err != nil {
-			return fmt.Errorf("icloud-mail: select %s: %w", mboxID, err)
+		// EXAMINE: a read-only open, so the server sets no flag on this
+		// path whatever a command asks for. Only MarkRead opens with SELECT.
+		if _, err := c.Select(mboxID, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+			return fmt.Errorf("icloud-mail: examine %s: %w", mboxID, err)
 		}
 
 		criteria := buildSearchCriteria(q)
@@ -318,8 +320,9 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Me
 
 	var msg *mail.Message
 	err := d.session(ctx, "get message", func(c *imapclient.Client) error {
-		if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
-			return fmt.Errorf("icloud-mail: select %s: %w", mailboxID, err)
+		// EXAMINE, as in ListMessages: the server backs up the Peek below.
+		if _, err := c.Select(mailboxID, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+			return fmt.Errorf("icloud-mail: examine %s: %w", mailboxID, err)
 		}
 
 		uid, err := strconv.ParseUint(id, 10, 32)
@@ -499,8 +502,10 @@ func (d *Driver) replyParent(c *imapclient.Client, mailboxID, id string) (string
 	if err != nil {
 		return "", nil, fmt.Errorf("icloud-mail: invalid reply message ID %q: %w", id, err)
 	}
-	if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
-		return "", nil, fmt.Errorf("icloud-mail: select %s for reply: %w", mailboxID, err)
+	// EXAMINE: reading the parent changes nothing in its mailbox. APPEND to
+	// Drafts needs no selected mailbox.
+	if _, err := c.Select(mailboxID, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		return "", nil, fmt.Errorf("icloud-mail: examine %s for reply: %w", mailboxID, err)
 	}
 
 	// Peek: looking up the parent must not mark it read.
