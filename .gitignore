@@ -3,3 +3,12 @@ freestone/freestone-mcp
 
 # OS
 .DS_Store
+/tmp
+
+# Private working material, kept local only
+/.claude/
+/freestone/.claude/
+/ccworkbench/
+/fusion-workbench/
+/fusion.json
+/project-draft.txt
