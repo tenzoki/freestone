@@ -27,7 +27,7 @@ func TestDecodeVEvent_Simple(t *testing.T) {
 	endProp.Value = "20260408T110000Z"
 	vevent.Props.Set(endProp)
 
-	e, err := decodeVEvent(vevent, "etag-123", "/cal/personal/")
+	e, err := decodeVEvent(vevent, "etag-123", "/cal/personal/", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestDecodeVEvent_AllDay(t *testing.T) {
 	startProp.Params.Set("VALUE", "DATE")
 	vevent.Props.Set(startProp)
 
-	e, err := decodeVEvent(vevent, "", "/cal/")
+	e, err := decodeVEvent(vevent, "", "/cal/", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestDecodeVEvent_WithTZID(t *testing.T) {
 	endProp.Params.Set("TZID", "Europe/Berlin")
 	vevent.Props.Set(endProp)
 
-	e, err := decodeVEvent(vevent, "", "/cal/")
+	e, err := decodeVEvent(vevent, "", "/cal/", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestExpandRRule_Weekly(t *testing.T) {
 		EndUTC:   time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
 	}
 
-	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{})
+	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{}, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestExpandRRule_WithEXDATE(t *testing.T) {
 		EndUTC:   time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
 	}
 
-	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{})
+	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{}, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestExpandRRule_WithUNTIL(t *testing.T) {
 		EndUTC:   time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
 	}
 
-	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{})
+	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{}, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,11 +251,11 @@ func zonedWeeklyEvent(uid, tzid, dtstart, dtend, rrule string) *ical.Component {
 
 func expandDecoded(t *testing.T, vevent *ical.Component, windowStart, windowEnd time.Time) []calendar.Event {
 	t.Helper()
-	base, err := decodeVEvent(vevent, "", "/cal/")
+	base, err := decodeVEvent(vevent, "", "/cal/", time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := expandSeries(vevent, base, noOverrides(), windowStart, windowEnd)
+	events, err := expandSeries(vevent, base, noOverrides(), windowStart, windowEnd, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestExpandRRule_BYDAYUsesLocalDateAcrossDST(t *testing.T) {
 }
 
 func noOverrides() *overrideSet {
-	s, err := decodeOverrides(nil, "", "")
+	s, err := decodeOverrides(nil, "", "", time.UTC)
 	if err != nil {
 		panic(err)
 	}
@@ -355,7 +355,7 @@ func d5Starts(events []calendar.Event) []string {
 
 func d5Decode(t *testing.T, cal *ical.Calendar) []calendar.Event {
 	t.Helper()
-	events, err := decodeEvents(cal, "etag", "/cal/", harnessTime("2026-12-01T00:00:00Z"), harnessTime("2027-01-01T00:00:00Z"))
+	events, err := decodeEvents(cal, "etag", "/cal/", harnessTime("2026-12-01T00:00:00Z"), harnessTime("2027-01-01T00:00:00Z"), time.UTC)
 	if err != nil {
 		t.Fatalf("decodeEvents: %v", err)
 	}
@@ -428,7 +428,7 @@ EXDATE;VALUE=DATE:20261203,20261204`)
 // D5: a malformed EXDATE fails the object instead of being ignored.
 func TestDecodeEvents_MalformedEXDATEIsError(t *testing.T) {
 	cal := d5Calendar(t, d5Master+"\nEXDATE:20261208T090000Z,not-a-date")
-	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}); err == nil || !strings.Contains(err.Error(), "EXDATE") {
+	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}, time.UTC); err == nil || !strings.Contains(err.Error(), "EXDATE") {
 		t.Fatalf("err = %v, want an EXDATE parse error", err)
 	}
 }
@@ -441,7 +441,7 @@ RECURRENCE-ID;RANGE=THISANDFUTURE:20261208T090000Z
 SUMMARY:From here on
 DTSTART:20261208T110000Z
 DTEND:20261208T120000Z`)
-	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}); err == nil || !strings.Contains(err.Error(), "THISANDFUTURE") {
+	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}, time.UTC); err == nil || !strings.Contains(err.Error(), "THISANDFUTURE") {
 		t.Fatalf("err = %v, want an error naming RANGE=THISANDFUTURE", err)
 	}
 }
@@ -557,7 +557,7 @@ func TestDecodeEvents_MalformedTextIsError(t *testing.T) {
 DESCRIPTION:bad \x escape
 DTSTART:20261202T090000Z
 DTEND:20261202T100000Z`)
-	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}); err == nil || !strings.Contains(err.Error(), "DESCRIPTION") {
+	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}, time.UTC); err == nil || !strings.Contains(err.Error(), "DESCRIPTION") {
 		t.Fatalf("err = %v, want a DESCRIPTION decode error", err)
 	}
 }
@@ -585,7 +585,7 @@ func TestEncodeDecode_TextRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	events, err := decodeEvents(parsed, "", "/cal/", time.Time{}, time.Time{})
+	events, err := decodeEvents(parsed, "", "/cal/", time.Time{}, time.Time{}, time.UTC)
 	if err != nil || len(events) != 1 {
 		t.Fatalf("decodeEvents = %+v, %v; want one event", events, err)
 	}

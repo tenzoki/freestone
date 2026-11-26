@@ -23,8 +23,9 @@ type series struct {
 // windowEnd) and each instance a RECURRENCE-ID override replaces is emitted
 // as that override. Any VEVENT that cannot be decoded or expanded fails the
 // whole object: emitting the rest would show a series with instances
-// silently missing or doubled.
-func decodeEvents(cal *ical.Calendar, etag, calendarID string, windowStart, windowEnd time.Time) ([]calendar.Event, error) {
+// silently missing or doubled. Floating date-times (no Z, no TZID) are read
+// in floating.
+func decodeEvents(cal *ical.Calendar, etag, calendarID string, windowStart, windowEnd time.Time, floating *time.Location) ([]calendar.Event, error) {
 	groups, err := groupByUID(cal)
 	if err != nil {
 		return nil, err
@@ -32,7 +33,7 @@ func decodeEvents(cal *ical.Calendar, etag, calendarID string, windowStart, wind
 
 	var events []calendar.Event
 	for _, s := range groups {
-		decoded, err := decodeSeries(s, etag, calendarID, windowStart, windowEnd)
+		decoded, err := decodeSeries(s, etag, calendarID, windowStart, windowEnd, floating)
 		if err != nil {
 			return nil, fmt.Errorf("uid %q: %w", s.uid, err)
 		}
@@ -72,20 +73,20 @@ func groupByUID(cal *ical.Calendar) ([]*series, error) {
 	return order, nil
 }
 
-func decodeSeries(s *series, etag, calendarID string, windowStart, windowEnd time.Time) ([]calendar.Event, error) {
-	overrides, err := decodeOverrides(s.overrides, etag, calendarID)
+func decodeSeries(s *series, etag, calendarID string, windowStart, windowEnd time.Time, floating *time.Location) ([]calendar.Event, error) {
+	overrides, err := decodeOverrides(s.overrides, etag, calendarID, floating)
 	if err != nil {
 		return nil, err
 	}
 
 	var events []calendar.Event
 	if s.master != nil {
-		base, err := decodeVEvent(s.master, etag, calendarID)
+		base, err := decodeVEvent(s.master, etag, calendarID, floating)
 		if err != nil {
 			return nil, err
 		}
 		if isRecurring(s.master) {
-			events, err = expandSeries(s.master, base, overrides, windowStart, windowEnd)
+			events, err = expandSeries(s.master, base, overrides, windowStart, windowEnd, floating)
 			if err != nil {
 				return nil, err
 			}
@@ -118,18 +119,18 @@ type overrideSet struct {
 	used    map[time.Time]bool
 }
 
-func decodeOverrides(vevents []*ical.Component, etag, calendarID string) (*overrideSet, error) {
+func decodeOverrides(vevents []*ical.Component, etag, calendarID string, floating *time.Location) (*overrideSet, error) {
 	set := &overrideSet{byStart: make(map[time.Time]calendar.Event), used: make(map[time.Time]bool)}
 	for _, v := range vevents {
 		ridProp := v.Props.Get(ical.PropRecurrenceID)
 		if r := ridProp.Params.Get(ical.ParamRange); r != "" {
 			return nil, fmt.Errorf("RECURRENCE-ID;RANGE=%s is not supported", r)
 		}
-		rid, err := parseDateTimeValue(ridProp.Value, ridProp.Params)
+		rid, err := parseDateTimeValue(ridProp.Value, ridProp.Params, floating)
 		if err != nil {
 			return nil, fmt.Errorf("parse RECURRENCE-ID %q: %w", ridProp.Value, err)
 		}
-		e, err := decodeVEvent(v, etag, calendarID)
+		e, err := decodeVEvent(v, etag, calendarID, floating)
 		if err != nil {
 			return nil, fmt.Errorf("override %s: %w", ridProp.Value, err)
 		}
@@ -164,7 +165,7 @@ func (s *overrideSet) unmatched() []calendar.Event {
 	return out
 }
 
-func decodeVEvent(vevent *ical.Component, etag, calendarID string) (calendar.Event, error) {
+func decodeVEvent(vevent *ical.Component, etag, calendarID string, floating *time.Location) (calendar.Event, error) {
 	e := calendar.Event{
 		Provider:   "icloud",
 		CalendarID: calendarID,
@@ -203,7 +204,7 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string) (calendar.Eve
 
 	// Parse DTSTART
 	if p := vevent.Props.Get(ical.PropDateTimeStart); p != nil {
-		start, tzid, allDay, err := parseDateTime(p)
+		start, tzid, allDay, err := parseDateTime(p, floating)
 		if err != nil {
 			return e, fmt.Errorf("parse DTSTART %q: %w", p.Value, err)
 		}
@@ -217,7 +218,7 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string) (calendar.Eve
 
 	// Parse DTEND
 	if p := vevent.Props.Get(ical.PropDateTimeEnd); p != nil {
-		end, _, _, err := parseDateTime(p)
+		end, _, _, err := parseDateTime(p, floating)
 		if err != nil {
 			return e, fmt.Errorf("parse DTEND %q: %w", p.Value, err)
 		}
@@ -243,32 +244,25 @@ func textValue(p *ical.Prop) (string, error) {
 	return strings.Join(parts, ","), nil
 }
 
-func parseDateTime(p *ical.Prop) (t time.Time, tzid string, allDay bool, err error) {
-	t, err = parseDateTimeValue(p.Value, p.Params)
+func parseDateTime(p *ical.Prop, floating *time.Location) (t time.Time, tzid string, allDay bool, err error) {
+	t, err = parseDateTimeValue(p.Value, p.Params, floating)
 	if err != nil {
 		return t, "", false, err
 	}
 	tzid = p.Params.Get(ical.ParamTimezoneID)
 	allDay = p.Params.Get(ical.ParamValue) == string(ical.ValueDate)
-	if !allDay && tzid != "" {
-		// A TZID that does not resolve was parsed as UTC or floating, so
-		// it does not describe the parsed instant.
-		if _, locErr := resolveLocation(tzid); locErr != nil {
-			tzid = ""
-		}
-	}
 	return t, tzid, allDay, nil
 }
 
 // parseDateTimeValues parses a list-valued date-time property (EXDATE,
 // RDATE), whose values are comma-separated and share one parameter set.
-func parseDateTimeValues(p *ical.Prop) ([]time.Time, error) {
+func parseDateTimeValues(p *ical.Prop, floating *time.Location) ([]time.Time, error) {
 	if p.Params.Get(ical.ParamValue) == string(ical.ValuePeriod) {
 		return nil, fmt.Errorf("%s;VALUE=PERIOD is not supported", p.Name)
 	}
 	var out []time.Time
 	for _, v := range strings.Split(p.Value, ",") {
-		t, err := parseDateTimeValue(v, p.Params)
+		t, err := parseDateTimeValue(v, p.Params, floating)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s %q: %w", p.Name, v, err)
 		}
@@ -278,20 +272,21 @@ func parseDateTimeValues(p *ical.Prop) ([]time.Time, error) {
 }
 
 // parseDateTimeValue parses one DATE or DATE-TIME value under its
-// property's parameters (VALUE, TZID).
-func parseDateTimeValue(value string, params ical.Params) (time.Time, error) {
+// property's parameters (VALUE, TZID). A zoned value is read in its TZID's
+// location, and a TZID that does not resolve is an error. A floating value
+// (no Z, no TZID) is read in floating (RFC 5545 §3.3.5).
+func parseDateTimeValue(value string, params ical.Params, floating *time.Location) (time.Time, error) {
 	// VALUE=DATE for all-day values.
 	if params.Get(ical.ParamValue) == string(ical.ValueDate) {
 		return time.Parse("20060102", value)
 	}
 
-	// Try parsing with explicit timezone. An unresolvable TZID still falls
-	// through to the UTC/floating parse below; that fallback is intentional
-	// until unknown zones are reported as decode errors.
 	if tzid := params.Get(ical.ParamTimezoneID); tzid != "" {
-		if loc, locErr := resolveLocation(tzid); locErr == nil {
-			return time.ParseInLocation("20060102T150405", value, loc)
+		loc, err := resolveLocation(tzid)
+		if err != nil {
+			return time.Time{}, err
 		}
+		return time.ParseInLocation("20060102T150405", value, loc)
 	}
 
 	// UTC timestamp (ends with Z).
@@ -299,6 +294,5 @@ func parseDateTimeValue(value string, params ical.Params) (time.Time, error) {
 		return time.Parse("20060102T150405Z", value)
 	}
 
-	// Floating time — treat as UTC.
-	return time.Parse("20060102T150405", value)
+	return time.ParseInLocation("20060102T150405", value, floating)
 }

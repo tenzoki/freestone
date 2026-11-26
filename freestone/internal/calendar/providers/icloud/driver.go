@@ -20,12 +20,20 @@ import (
 type Driver struct {
 	client  *caldav.Client
 	homeSet string
-	log     *slog.Logger
+	// floating is the location a floating date-time (no Z, no TZID) is
+	// read in: RFC 5545 defines it as the user's local time, which only
+	// the caller knows.
+	floating *time.Location
+	log      *slog.Logger
 }
 
 // New creates a new iCloud calendar driver. It discovers the principal
-// and calendar home set during construction.
-func New(ctx context.Context, endpoint, username, password string, log *slog.Logger) (*Driver, error) {
+// and calendar home set during construction. floating is the location
+// floating date-times are interpreted in.
+func New(ctx context.Context, endpoint, username, password string, floating *time.Location, log *slog.Logger) (*Driver, error) {
+	if floating == nil {
+		return nil, fmt.Errorf("icloud-calendar: no location for floating times")
+	}
 	httpClient := webdav.HTTPClientWithBasicAuth(
 		&http.Client{Timeout: 30 * time.Second},
 		username, password,
@@ -45,7 +53,7 @@ func New(ctx context.Context, endpoint, username, password string, log *slog.Log
 		return nil, fmt.Errorf("icloud-calendar: find home set: %w", err)
 	}
 
-	return &Driver{client: client, homeSet: homeSet, log: log}, nil
+	return &Driver{client: client, homeSet: homeSet, floating: floating, log: log}, nil
 }
 
 func (d *Driver) Name() string { return "icloud" }
@@ -115,7 +123,7 @@ func (d *Driver) ListEvents(ctx context.Context, q calendar.EventQuery) (calenda
 			skip(obj, fmt.Errorf("no calendar data"))
 			continue
 		}
-		decoded, err := decodeEvents(obj.Data, obj.ETag, q.CalendarID, q.Start, q.End)
+		decoded, err := decodeEvents(obj.Data, obj.ETag, q.CalendarID, q.Start, q.End, d.floating)
 		if err != nil {
 			skip(obj, err)
 			continue
@@ -143,7 +151,7 @@ func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*calenda
 	if err != nil {
 		return nil, err
 	}
-	events, err := decodeEvents(obj.Data, obj.ETag, calendarID, time.Time{}, time.Time{})
+	events, err := decodeEvents(obj.Data, obj.ETag, calendarID, time.Time{}, time.Time{}, d.floating)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +225,7 @@ func (d *Driver) UpdateEvent(ctx context.Context, p calendar.EventPatch) (*calen
 		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", p.UID, err)
 	}
 
-	e, err := decodeVEvent(master, put.ETag, p.CalendarID)
+	e, err := decodeVEvent(master, put.ETag, p.CalendarID, d.floating)
 	if err != nil {
 		return nil, fmt.Errorf("icloud-calendar: decode updated event %s: %w", p.UID, err)
 	}

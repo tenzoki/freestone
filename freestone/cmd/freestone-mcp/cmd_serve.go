@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/oauth2"
 
@@ -60,7 +61,9 @@ func runServe(args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve icloud calendar secret: %w", err)
 		}
-		drv, err := icloudcal.New(ctx, ic.Endpoint, ic.Username, password, log)
+		// Floating iCal times are the user's wall clock; this server runs on
+		// the user's machine, so its local zone is that clock.
+		drv, err := icloudcal.New(ctx, ic.Endpoint, ic.Username, password, time.Local, log)
 		if err != nil {
 			log.Error("icloud calendar init failed", "err", err)
 		} else {

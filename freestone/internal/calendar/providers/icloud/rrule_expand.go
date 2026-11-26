@@ -18,8 +18,8 @@ const maxExpansions = 366
 // to a 1-year window from the event's DTSTART to avoid unbounded expansion.
 // An instance that an override replaces is emitted as that override; the
 // override is marked used in overrides.
-func expandSeries(master *ical.Component, base calendar.Event, overrides *overrideSet, windowStart, windowEnd time.Time) ([]calendar.Event, error) {
-	set, dtstart, err := recurrenceSet(master)
+func expandSeries(master *ical.Component, base calendar.Event, overrides *overrideSet, windowStart, windowEnd time.Time, floating *time.Location) ([]calendar.Event, error) {
+	set, dtstart, err := recurrenceSet(master, floating)
 	if err != nil {
 		return nil, err
 	}
@@ -87,8 +87,8 @@ func expandSeries(master *ical.Component, base calendar.Event, overrides *overri
 // DTSTART, the RRULE if any, every RDATE, minus every EXDATE. It is the one
 // place a series' instants are defined, so overrides, exclusions and extra
 // dates cannot disagree about which instants exist.
-func recurrenceSet(vevent *ical.Component) (*rrule.Set, time.Time, error) {
-	dtstart, err := recurrenceStart(vevent)
+func recurrenceSet(vevent *ical.Component, floating *time.Location) (*rrule.Set, time.Time, error) {
+	dtstart, err := recurrenceStart(vevent, floating)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -113,7 +113,7 @@ func recurrenceSet(vevent *ical.Component) (*rrule.Set, time.Time, error) {
 	}
 
 	for _, p := range vevent.Props.Values(ical.PropRecurrenceDates) {
-		dates, err := parseDateTimeValues(&p)
+		dates, err := parseDateTimeValues(&p, floating)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -122,7 +122,7 @@ func recurrenceSet(vevent *ical.Component) (*rrule.Set, time.Time, error) {
 		}
 	}
 	for _, p := range vevent.Props.Values(ical.PropExceptionDates) {
-		dates, err := parseDateTimeValues(&p)
+		dates, err := parseDateTimeValues(&p, floating)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -138,12 +138,12 @@ func recurrenceSet(vevent *ical.Component) (*rrule.Set, time.Time, error) {
 // from the UTC instant pins every occurrence to the UTC offset in force at
 // DTSTART, which shifts the local hour across DST and evaluates BYDAY on the
 // UTC date instead of the local one.
-func recurrenceStart(vevent *ical.Component) (time.Time, error) {
+func recurrenceStart(vevent *ical.Component, floating *time.Location) (time.Time, error) {
 	p := vevent.Props.Get(ical.PropDateTimeStart)
 	if p == nil {
 		return time.Time{}, fmt.Errorf("recurring event has no DTSTART")
 	}
-	start, _, _, err := parseDateTime(p)
+	start, _, _, err := parseDateTime(p, floating)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse DTSTART %q: %w", p.Value, err)
 	}

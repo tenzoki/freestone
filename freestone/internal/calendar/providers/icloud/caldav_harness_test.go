@@ -78,7 +78,7 @@ func newCalDAVHarness(t *testing.T) *calDAVHarness {
 // and home-set discovery run over the wire too.
 func (h *calDAVHarness) driver() *Driver {
 	h.t.Helper()
-	d, err := New(context.Background(), h.srv.URL, "user", "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d, err := New(context.Background(), h.srv.URL, "user", "secret", time.UTC, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		h.t.Fatalf("harness: New: %v", err)
 	}
