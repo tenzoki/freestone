@@ -266,7 +266,8 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (_ *mail.
 	}
 
 	uidSet := imap.UIDSetNum(imap.UID(uid))
-	bodySection := &imap.FetchItemBodySection{}
+	// Peek: reading a message must not mark it read; only MarkRead sets \Seen.
+	bodySection := &imap.FetchItemBodySection{Peek: true}
 	fetchOptions := &imap.FetchOptions{
 		Envelope:     true,
 		Flags:        true,

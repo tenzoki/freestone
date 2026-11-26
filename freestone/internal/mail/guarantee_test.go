@@ -3,7 +3,9 @@ package mail
 // The mail write-surface guarantee: freestone saves drafts and marks messages
 // read, and does nothing else that changes a mailbox. It never sends, deletes,
 // trashes, moves or expunges, and it sets \Seen (IMAP) or removes UNREAD
-// (Gmail) only inside a MarkRead method.
+// (Gmail) only inside a MarkRead method. An IMAP body fetch without the PEEK
+// modifier sets \Seen implicitly (RFC 9051 6.4.5), so every body or binary
+// section requested outside MarkRead must set Peek: true.
 //
 // The Gmail scope freestone needs for drafts and mark-read (gmail.modify) also
 // permits sending and trashing, so the OAuth grant is not a guard. This test is.
@@ -207,6 +209,8 @@ func (s *surfaceScanner) visit(n ast.Node) {
 		switch {
 		case p == imapImportPath && name == "StoreFlags":
 			s.checkStoreFlags(n)
+		case p == imapImportPath && (name == "FetchItemBodySection" || name == "FetchItemBinarySection"):
+			s.checkPeek(n, name)
 		case p == gmailImportPath && name == "ModifyMessageRequest":
 			s.checkModifyRequest(n)
 		case p == gmailImportPath && (name == "ModifyThreadRequest" || name == "BatchModifyMessagesRequest" || name == "BatchDeleteMessagesRequest"):
@@ -253,6 +257,31 @@ func (s *surfaceScanner) inSearchCriterion() bool {
 		}
 	}
 	return false
+}
+
+// checkPeek requires a body or binary fetch section outside MarkRead to carry
+// Peek: true, written as the literal identifier true. Anything else (missing,
+// false, a variable) is a violation, because a non-peek fetch marks the
+// message read.
+func (s *surfaceScanner) checkPeek(lit *ast.CompositeLit, name string) {
+	if s.inMarkRead() {
+		return
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, isIdent := kv.Key.(*ast.Ident)
+		if !isIdent || key.Name != "Peek" {
+			continue
+		}
+		if val, isIdent := kv.Value.(*ast.Ident); isIdent && val.Name == "true" {
+			return
+		}
+		break
+	}
+	s.report(lit, "imap.%s literal without Peek: true outside %s (a non-peek fetch sets \\Seen)", name, markReadMethod)
 }
 
 // checkStoreFlags allows exactly {Op: imap.StoreFlagsAdd, Flags: {imap.FlagSeen}},
@@ -426,7 +455,23 @@ func f() { _ = "d.svc.Users.Messages.Send(me) c.Delete(INBOX)" }`, ""},
 func f() { io.Copy(w, r); slices.Delete(s, 0, 1); slices.Insert(s, 0, 1) }`, ""},
 		{"draft append is allowed", `
 func f() { c.Append("Drafts", n, nil); d.svc.Users.Drafts.Create("me", dr) }`, ""},
+		{"body fetch with Peek is allowed", `
+func (d *D) GetMessage() { _ = &imap.FetchItemBodySection{Peek: true} }`, ""},
+		{"binary fetch with Peek is allowed", `
+func (d *D) GetMessage() { _ = &imap.FetchItemBinarySection{Part: []int{1}, Peek: true} }`, ""},
+		{"non-peek body fetch inside MarkRead is allowed", `
+func (d *D) MarkRead() { _ = &imap.FetchItemBodySection{} }`, ""},
 
+		{"body fetch without Peek", `
+func (d *D) GetMessage() { _ = &imap.FetchItemBodySection{} }`, "FetchItemBodySection literal without Peek: true"},
+		{"body fetch with Peek: false", `
+func (d *D) GetMessage() { _ = &imap.FetchItemBodySection{Peek: false} }`, "FetchItemBodySection literal without Peek: true"},
+		{"body fetch with Peek from a variable", `
+func (d *D) GetMessage() { _ = &imap.FetchItemBodySection{Peek: peek} }`, "FetchItemBodySection literal without Peek: true"},
+		{"binary fetch without Peek", `
+func f() { _ = &imap.FetchItemBinarySection{Part: []int{1}} }`, "FetchItemBinarySection literal without Peek: true"},
+		{"aliased import does not hide a non-peek fetch", `
+func f() { _ = &goimap.FetchItemBodySection{} }`, "FetchItemBodySection literal without Peek: true"},
 		{"IMAP move", `func f() { c.Move(uids, "Trash") }`, ".Move"},
 		{"IMAP copy", `func f() { c.Copy(uids, "Trash") }`, ".Copy"},
 		{"IMAP expunge", `func f() { c.Expunge() }`, ".Expunge"},

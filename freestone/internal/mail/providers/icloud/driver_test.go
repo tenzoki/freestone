@@ -1,6 +1,8 @@
 package icloud
 
 import (
+	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,5 +95,34 @@ func TestDecodeBody_PlainText(t *testing.T) {
 	}
 	if html != "" {
 		t.Errorf("html = %q, want empty", html)
+	}
+}
+
+// D2: fetching a message body must not mark it read. Only MarkRead sets \Seen.
+func TestGetMessage_LeavesSeenUnset(t *testing.T) {
+	h := newIMAPHarness(t)
+	uid := h.seed("INBOX", smokeMessage)
+
+	msg, err := h.driver().GetMessage(context.Background(), "INBOX", strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if !strings.Contains(msg.Text, "Body text.") {
+		t.Errorf("GetMessage text = %q, want the body (the fetch must still read it)", msg.Text)
+	}
+	if m := h.message("INBOX", uid); m.hasFlag(imap.FlagSeen) {
+		t.Errorf("flags after GetMessage = %v, want no \\Seen", m.Flags)
+	}
+}
+
+func TestMarkRead_SetsSeen(t *testing.T) {
+	h := newIMAPHarness(t)
+	uid := h.seed("INBOX", smokeMessage)
+
+	if err := h.driver().MarkRead(context.Background(), "INBOX", strconv.FormatUint(uint64(uid), 10)); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	if m := h.message("INBOX", uid); !m.hasFlag(imap.FlagSeen) {
+		t.Errorf("flags after MarkRead = %v, want \\Seen", m.Flags)
 	}
 }
