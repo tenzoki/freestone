@@ -184,8 +184,50 @@ func TestCalendarListEvents(t *testing.T) {
 		t.Fatalf("expected success, got: %s", extractText(result))
 	}
 	text := extractText(result)
-	if !strings.Contains(text, "Test Event") {
-		t.Errorf("expected 'Test Event', got: %s", text)
+	// The output is an object carrying the events array; warnings is
+	// omitted when nothing was skipped.
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("output is not a JSON object: %v: %s", err, text)
+	}
+	var events []calendar.Event
+	if err := json.Unmarshal(out["events"], &events); err != nil {
+		t.Fatalf("events is not an array of events: %v: %s", err, text)
+	}
+	if len(events) != 1 || events[0].Summary != "Test Event" {
+		t.Errorf("events = %+v, want one 'Test Event'", events)
+	}
+	if _, ok := out["warnings"]; ok {
+		t.Errorf("warnings present with nothing skipped: %s", text)
+	}
+}
+
+// An empty window lists an empty events array, never null.
+func TestCalendarListEvents_EmptyWindow(t *testing.T) {
+	session, ctx := buildTestServer(t)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "calendar_list_events",
+		Arguments: map[string]any{
+			"provider":    "icloud",
+			"calendar_id": "/cal/personal/",
+			"start":       "2030-01-01T00:00:00Z",
+			"end":         "2030-01-02T00:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", extractText(result))
+	}
+	text := extractText(result)
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("output is not a JSON object: %v: %s", err, text)
+	}
+	if got := strings.TrimSpace(string(out["events"])); got != "[]" {
+		t.Errorf("events = %s, want []", got)
 	}
 }
 

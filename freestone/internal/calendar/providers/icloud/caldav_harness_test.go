@@ -439,7 +439,7 @@ END:VCALENDAR
 		t.Fatalf("ListCalendars = %+v, want one calendar %s named Personal", cals, cal)
 	}
 
-	events, err := d.ListEvents(ctx, calendar.EventQuery{
+	list, err := d.ListEvents(ctx, calendar.EventQuery{
 		CalendarID: cal,
 		Start:      harnessTime("2026-11-26T00:00:00Z"),
 		End:        harnessTime("2026-11-27T00:00:00Z"),
@@ -447,6 +447,7 @@ END:VCALENDAR
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
+	events := list.Events
 	if len(events) != 1 || events[0].UID != "uid-1" || events[0].Summary != "Standup" {
 		t.Fatalf("ListEvents = %+v, want uid-1 Standup", events)
 	}

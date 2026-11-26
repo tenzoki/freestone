@@ -95,7 +95,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 	mcp.AddTool(srv,
 		&mcp.Tool{
 			Name:        "calendar_list_events",
-			Description: "List events in a calendar within a time range.",
+			Description: "List events in a calendar within a time range. Returns {events, warnings}; warnings names each calendar object that could not be read and was left out.",
 		},
 		withLog(log, "calendar_list_events", func(ctx context.Context, _ *mcp.CallToolRequest, input listEventsInput) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := withTimeout(ctx)
@@ -112,7 +112,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			if err != nil {
 				return errResult(fmt.Errorf("invalid end time: %w", err)), nil, nil
 			}
-			events, err := p.ListEvents(ctx, calendar.EventQuery{
+			list, err := p.ListEvents(ctx, calendar.EventQuery{
 				CalendarID: input.CalendarID,
 				Start:      start,
 				End:        end,
@@ -120,7 +120,11 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 			if err != nil {
 				return errResult(err), nil, nil
 			}
-			return jsonResult(events), nil, nil
+			// An empty window is an empty array, not null.
+			if list.Events == nil {
+				list.Events = []calendar.Event{}
+			}
+			return jsonResult(list), nil, nil
 		}),
 	)
 

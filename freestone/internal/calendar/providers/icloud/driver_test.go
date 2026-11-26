@@ -1,6 +1,8 @@
 package icloud
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,7 +127,7 @@ func TestExpandRRule_Weekly(t *testing.T) {
 		EndUTC:   time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
 	}
 
-	events, err := expandRRule(vevent, base, time.Time{}, time.Time{})
+	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +179,7 @@ func TestExpandRRule_WithEXDATE(t *testing.T) {
 		EndUTC:   time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
 	}
 
-	events, err := expandRRule(vevent, base, time.Time{}, time.Time{})
+	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +218,7 @@ func TestExpandRRule_WithUNTIL(t *testing.T) {
 		EndUTC:   time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
 	}
 
-	events, err := expandRRule(vevent, base, time.Time{}, time.Time{})
+	events, err := expandSeries(vevent, base, noOverrides(), time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +255,7 @@ func expandDecoded(t *testing.T, vevent *ical.Component, windowStart, windowEnd 
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := expandRRule(vevent, base, windowStart, windowEnd)
+	events, err := expandSeries(vevent, base, noOverrides(), windowStart, windowEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,5 +317,205 @@ func TestExpandRRule_BYDAYUsesLocalDateAcrossDST(t *testing.T) {
 	// The series crosses the 2026-03-29 switch: the last instance is in CEST.
 	if _, offset := events[len(events)-1].StartUTC.In(berlin).Zone(); offset != 2*3600 {
 		t.Errorf("last instance offset = %d, want CEST (+7200)", offset)
+	}
+}
+
+func noOverrides() *overrideSet {
+	s, err := decodeOverrides(nil, "", "")
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// d5Calendar parses one VCALENDAR from VEVENT bodies written with LF line
+// ends; each body is wrapped in BEGIN/END:VEVENT.
+func d5Calendar(t *testing.T, vevents ...string) *ical.Calendar {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n")
+	for _, v := range vevents {
+		b.WriteString("BEGIN:VEVENT\nDTSTAMP:20261101T080000Z\n" + strings.TrimSpace(v) + "\nEND:VEVENT\n")
+	}
+	b.WriteString("END:VCALENDAR\n")
+	cal, err := ical.NewDecoder(strings.NewReader(strings.ReplaceAll(b.String(), "\n", "\r\n"))).Decode()
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	return cal
+}
+
+func d5Starts(events []calendar.Event) []string {
+	out := make([]string, len(events))
+	for i, e := range events {
+		out[i] = e.StartUTC.Format("2006-01-02T15:04Z")
+	}
+	return out
+}
+
+func d5Decode(t *testing.T, cal *ical.Calendar) []calendar.Event {
+	t.Helper()
+	events, err := decodeEvents(cal, "etag", "/cal/", harnessTime("2026-12-01T00:00:00Z"), harnessTime("2027-01-01T00:00:00Z"))
+	if err != nil {
+		t.Fatalf("decodeEvents: %v", err)
+	}
+	return events
+}
+
+// Weekly Tuesday 09:00Z series from 2026-12-01, four instances.
+const d5Master = `UID:series-1
+SUMMARY:Weekly
+DTSTART:20261201T090000Z
+DTEND:20261201T100000Z
+RRULE:FREQ=WEEKLY;COUNT=4`
+
+// D5: an override moving the Dec 8 Tuesday to Wednesday Dec 9 replaces that
+// instance; the Tuesday slot is gone and the Wednesday shows once.
+func TestDecodeEvents_OverrideReplacesInstance(t *testing.T) {
+	cal := d5Calendar(t, d5Master, `UID:series-1
+RECURRENCE-ID:20261208T090000Z
+SUMMARY:Moved
+DTSTART:20261209T090000Z
+DTEND:20261209T100000Z`)
+
+	events := d5Decode(t, cal)
+	got := d5Starts(events)
+	want := []string{"2026-12-01T09:00Z", "2026-12-09T09:00Z", "2026-12-15T09:00Z", "2026-12-22T09:00Z"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("starts = %v, want %v", got, want)
+	}
+	moved := events[1]
+	if moved.Summary != "Moved" || moved.RecurringParentUID != "series-1" || !moved.InstanceStartUTC.Equal(harnessTime("2026-12-08T09:00:00Z")) {
+		t.Errorf("override = %+v, want summary Moved, parent series-1, instance 2026-12-08T09:00Z", moved)
+	}
+}
+
+// D5: a multi-value EXDATE excludes every listed instance.
+func TestDecodeEvents_MultiValueEXDATE(t *testing.T) {
+	cal := d5Calendar(t, d5Master+"\nEXDATE:20261208T090000Z,20261215T090000Z")
+	got := d5Starts(d5Decode(t, cal))
+	want := []string{"2026-12-01T09:00Z", "2026-12-22T09:00Z"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("starts = %v, want %v", got, want)
+	}
+}
+
+// D5: an RDATE adds an instance to the series.
+func TestDecodeEvents_RDATEAddsInstance(t *testing.T) {
+	cal := d5Calendar(t, d5Master+"\nRDATE:20261203T140000Z")
+	got := d5Starts(d5Decode(t, cal))
+	want := []string{"2026-12-01T09:00Z", "2026-12-03T14:00Z", "2026-12-08T09:00Z", "2026-12-15T09:00Z", "2026-12-22T09:00Z"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("starts = %v, want %v", got, want)
+	}
+}
+
+// D5: EXDATE;VALUE=DATE excludes days of an all-day series, also as a list.
+func TestDecodeEvents_AllDayEXDATE(t *testing.T) {
+	cal := d5Calendar(t, `UID:allday-series
+SUMMARY:Daily
+DTSTART;VALUE=DATE:20261201
+DTEND;VALUE=DATE:20261202
+RRULE:FREQ=DAILY;COUNT=5
+EXDATE;VALUE=DATE:20261203,20261204`)
+	got := d5Starts(d5Decode(t, cal))
+	want := []string{"2026-12-01T00:00Z", "2026-12-02T00:00Z", "2026-12-05T00:00Z"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("starts = %v, want %v", got, want)
+	}
+}
+
+// D5: a malformed EXDATE fails the object instead of being ignored.
+func TestDecodeEvents_MalformedEXDATEIsError(t *testing.T) {
+	cal := d5Calendar(t, d5Master+"\nEXDATE:20261208T090000Z,not-a-date")
+	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}); err == nil || !strings.Contains(err.Error(), "EXDATE") {
+		t.Fatalf("err = %v, want an EXDATE parse error", err)
+	}
+}
+
+// D5: RANGE=THISANDFUTURE is not applied, so it is a decode error naming
+// the parameter rather than a series shown with the wrong instances.
+func TestDecodeEvents_RangeThisAndFutureIsError(t *testing.T) {
+	cal := d5Calendar(t, d5Master, `UID:series-1
+RECURRENCE-ID;RANGE=THISANDFUTURE:20261208T090000Z
+SUMMARY:From here on
+DTSTART:20261208T110000Z
+DTEND:20261208T120000Z`)
+	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}); err == nil || !strings.Contains(err.Error(), "THISANDFUTURE") {
+		t.Fatalf("err = %v, want an error naming RANGE=THISANDFUTURE", err)
+	}
+}
+
+func d5Seed(h *calDAVHarness, href string, vevents ...string) {
+	h.t.Helper()
+	var b strings.Builder
+	b.WriteString("BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n")
+	for _, v := range vevents {
+		b.WriteString("BEGIN:VEVENT\nDTSTAMP:20261101T080000Z\n" + strings.TrimSpace(v) + "\nEND:VEVENT\n")
+	}
+	b.WriteString("END:VCALENDAR\n")
+	h.seedObject(href, b.String())
+}
+
+// D5: the window filter applies to overrides. An instance moved out of the
+// window disappears from it, and neither its old nor its new slot is shown.
+func TestListEvents_OverrideMovedOutOfWindowIsExcluded(t *testing.T) {
+	h := newCalDAVHarness(t)
+	cal := h.addCalendar("personal", "Personal")
+	d5Seed(h, cal+"series.ics", d5Master, `UID:series-1
+RECURRENCE-ID:20261208T090000Z
+SUMMARY:Moved to January
+DTSTART:20270105T090000Z
+DTEND:20270105T100000Z`)
+
+	list, err := h.driver().ListEvents(context.Background(), calendar.EventQuery{
+		CalendarID: cal,
+		Start:      harnessTime("2026-12-01T00:00:00Z"),
+		End:        harnessTime("2026-12-31T00:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	got := d5Starts(list.Events)
+	want := []string{"2026-12-01T09:00Z", "2026-12-15T09:00Z", "2026-12-22T09:00Z"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("starts = %v, want %v", got, want)
+	}
+	if len(list.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none", list.Warnings)
+	}
+}
+
+// D5: an object that cannot be expanded is skipped and named in Warnings;
+// the good object beside it is still listed.
+func TestListEvents_UndecodableObjectIsWarning(t *testing.T) {
+	h := newCalDAVHarness(t)
+	cal := h.addCalendar("personal", "Personal")
+	d5Seed(h, cal+"good.ics", `UID:good-1
+SUMMARY:Good
+DTSTART:20261202T090000Z
+DTEND:20261202T100000Z`)
+	// The server's own time-range filter cannot parse a multi-value
+	// EXDATE, so the undecodable object here is a THISANDFUTURE override,
+	// which the server ignores and the driver cannot apply.
+	d5Seed(h, cal+"bad.ics", d5Master, `UID:series-1
+RECURRENCE-ID;RANGE=THISANDFUTURE:20261208T090000Z
+SUMMARY:From here on
+DTSTART:20261208T110000Z
+DTEND:20261208T120000Z`)
+
+	list, err := h.driver().ListEvents(context.Background(), calendar.EventQuery{
+		CalendarID: cal,
+		Start:      harnessTime("2026-12-01T00:00:00Z"),
+		End:        harnessTime("2026-12-31T00:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(list.Events) != 1 || list.Events[0].UID != "good-1" {
+		t.Errorf("events = %+v, want only good-1", list.Events)
+	}
+	if len(list.Warnings) != 1 || !strings.Contains(list.Warnings[0], cal+"bad.ics") || !strings.Contains(list.Warnings[0], "THISANDFUTURE") {
+		t.Errorf("warnings = %q, want one naming %sbad.ics and the RANGE error", list.Warnings, cal)
 	}
 }

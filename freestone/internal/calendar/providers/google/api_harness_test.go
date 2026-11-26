@@ -166,7 +166,7 @@ func TestCalendarAPIHarness_Smoke(t *testing.T) {
 		}},
 	})
 
-	events, err := h.driver().ListEvents(context.Background(), domain.EventQuery{
+	list, err := h.driver().ListEvents(context.Background(), domain.EventQuery{
 		CalendarID: "primary",
 		Start:      time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC),
 		End:        time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC),
@@ -174,6 +174,7 @@ func TestCalendarAPIHarness_Smoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
+	events := list.Events
 	if len(events) != 1 || events[0].UID != "evt-1" || events[0].Summary != "Standup" {
 		t.Fatalf("ListEvents = %+v, want evt-1 Standup", events)
 	}

@@ -79,7 +79,7 @@ func TestFake_ListEventsWithTimeFilter(t *testing.T) {
 		},
 	}
 
-	events, err := f.ListEvents(context.Background(), EventQuery{
+	list, err := f.ListEvents(context.Background(), EventQuery{
 		CalendarID: "cal1",
 		Start:      now.Add(-1 * time.Hour),
 		End:        now.Add(1 * time.Hour),
@@ -87,6 +87,7 @@ func TestFake_ListEventsWithTimeFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	events := list.Events
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}

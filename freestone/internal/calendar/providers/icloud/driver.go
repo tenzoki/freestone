@@ -68,7 +68,10 @@ func (d *Driver) ListCalendars(ctx context.Context) ([]calendar.Calendar, error)
 	return result, nil
 }
 
-func (d *Driver) ListEvents(ctx context.Context, q calendar.EventQuery) ([]calendar.Event, error) {
+// ListEvents returns the events of every calendar object in the window. An
+// object that cannot be decoded or expanded is skipped, logged, and named in
+// the result's Warnings.
+func (d *Driver) ListEvents(ctx context.Context, q calendar.EventQuery) (calendar.EventList, error) {
 	calPath := q.CalendarID
 	if calPath == "" {
 		calPath = d.homeSet
@@ -99,21 +102,28 @@ func (d *Driver) ListEvents(ctx context.Context, q calendar.EventQuery) ([]calen
 
 	objects, err := d.client.QueryCalendar(ctx, calPath, query)
 	if err != nil {
-		return nil, fmt.Errorf("icloud-calendar: query: %w", err)
+		return calendar.EventList{}, fmt.Errorf("icloud-calendar: query: %w", err)
 	}
 
-	var events []calendar.Event
+	var list calendar.EventList
+	skip := func(obj caldav.CalendarObject, err error) {
+		d.log.Warn("skipping calendar object", "path", obj.Path, "etag", obj.ETag, "err", err)
+		list.Warnings = append(list.Warnings, fmt.Sprintf("skipped %s: %v", obj.Path, err))
+	}
 	for _, obj := range objects {
 		if obj.Data == nil {
+			skip(obj, fmt.Errorf("no calendar data"))
 			continue
 		}
-		decoded, err := decodeEvents(obj.Data, obj.ETag, q.CalendarID, q.Start, q.End, d.log)
+		decoded, err := decodeEvents(obj.Data, obj.ETag, q.CalendarID, q.Start, q.End)
 		if err != nil {
-			d.log.Warn("skipping malformed calendar object", "path", calPath, "etag", obj.ETag, "err", err)
+			skip(obj, err)
 			continue
 		}
 		for _, e := range decoded {
-			// Filter expanded RRULE instances to the query window [Start, End).
+			// Filter every recurring-series event, overrides included, to the
+			// query window [Start, End): the server matched the object, not
+			// each instance, and a moved instance may lie outside it.
 			if e.RecurringParentUID != "" {
 				if !q.Start.IsZero() && e.StartUTC.Before(q.Start) {
 					continue
@@ -122,10 +132,10 @@ func (d *Driver) ListEvents(ctx context.Context, q calendar.EventQuery) ([]calen
 					continue
 				}
 			}
-			events = append(events, e)
+			list.Events = append(list.Events, e)
 		}
 	}
-	return events, nil
+	return list, nil
 }
 
 func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*calendar.Event, error) {
@@ -133,7 +143,7 @@ func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*calenda
 	if err != nil {
 		return nil, err
 	}
-	events, err := decodeEvents(obj.Data, obj.ETag, calendarID, time.Time{}, time.Time{}, d.log)
+	events, err := decodeEvents(obj.Data, obj.ETag, calendarID, time.Time{}, time.Time{})
 	if err != nil {
 		return nil, err
 	}

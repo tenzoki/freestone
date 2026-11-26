@@ -20,7 +20,7 @@ func (f *Fake) ListCalendars(_ context.Context) ([]Calendar, error) {
 
 // ListEvents returns events with StartUTC in the half-open interval
 // [q.Start, q.End), matching standard CalDAV time-range semantics.
-func (f *Fake) ListEvents(_ context.Context, q EventQuery) ([]Event, error) {
+func (f *Fake) ListEvents(_ context.Context, q EventQuery) (EventList, error) {
 	events := f.Events[q.CalendarID]
 	var result []Event
 	for _, e := range events {
@@ -33,7 +33,7 @@ func (f *Fake) ListEvents(_ context.Context, q EventQuery) ([]Event, error) {
 		e.Provider = f.ProviderName
 		result = append(result, e)
 	}
-	return result, nil
+	return EventList{Events: result}, nil
 }
 
 func (f *Fake) GetEvent(_ context.Context, calendarID, uid string) (*Event, error) {

@@ -52,7 +52,8 @@ func (d *Driver) ListCalendars(ctx context.Context) ([]domain.Calendar, error) {
 
 // ListEvents returns events in the given calendar within the query time range.
 // Uses SingleEvents(true) so the Google API expands recurring events.
-func (d *Driver) ListEvents(ctx context.Context, q domain.EventQuery) ([]domain.Event, error) {
+// It reports no warnings: an item that cannot be converted fails the list.
+func (d *Driver) ListEvents(ctx context.Context, q domain.EventQuery) (domain.EventList, error) {
 	call := d.svc.Events.List(q.CalendarID).
 		Context(ctx).
 		SingleEvents(true).
@@ -77,9 +78,9 @@ func (d *Driver) ListEvents(ctx context.Context, q domain.EventQuery) ([]domain.
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("google calendar: list events: %w", err)
+		return domain.EventList{}, fmt.Errorf("google calendar: list events: %w", err)
 	}
-	return events, nil
+	return domain.EventList{Events: events}, nil
 }
 
 // GetEvent retrieves a single event by ID.

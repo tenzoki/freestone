@@ -50,6 +50,14 @@ type EventQuery struct {
 	End        time.Time
 }
 
+// EventList is the result of listing events. Warnings names every calendar
+// object the provider skipped because it could not decode or expand it, so a
+// missing event is visible to the caller instead of vanishing silently.
+type EventList struct {
+	Events   []Event  `json:"events"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
 // EventPatch names the fields of an existing event to change. A nil field
 // keeps the stored value; a pointer to "" clears a text field. Start and End
 // are given together or not at all. Providers apply the patch to the stored
@@ -72,7 +80,7 @@ type EventPatch struct {
 type Provider interface {
 	Name() string
 	ListCalendars(ctx context.Context) ([]Calendar, error)
-	ListEvents(ctx context.Context, q EventQuery) ([]Event, error)
+	ListEvents(ctx context.Context, q EventQuery) (EventList, error)
 	GetEvent(ctx context.Context, calendarID, uid string) (*Event, error)
 	// Phase 2 write operations
 	CreateEvent(ctx context.Context, calendarID string, e Event) (*Event, error)

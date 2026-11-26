@@ -13,32 +13,17 @@ import (
 // maxExpansions caps the number of instances to prevent unbounded RRULE explosion.
 const maxExpansions = 366
 
-// expandRRule expands a recurring VEVENT into individual instances within the
-// given query window [windowStart, windowEnd). If both are zero, falls back to
-// a 1-year window from the event's DTSTART to avoid unbounded expansion.
-func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windowEnd time.Time) ([]calendar.Event, error) {
-	rruleProp := vevent.Props.Get("RRULE")
-	if rruleProp == nil {
-		return nil, nil
-	}
-
-	dtstart, err := recurrenceStart(vevent)
+// expandSeries expands a recurring master VEVENT into its instances within
+// the query window [windowStart, windowEnd). If both are zero, it falls back
+// to a 1-year window from the event's DTSTART to avoid unbounded expansion.
+// An instance that an override replaces is emitted as that override; the
+// override is marked used in overrides.
+func expandSeries(master *ical.Component, base calendar.Event, overrides *overrideSet, windowStart, windowEnd time.Time) ([]calendar.Event, error) {
+	set, dtstart, err := recurrenceSet(master)
 	if err != nil {
 		return nil, err
 	}
 	duration := base.EndUTC.Sub(base.StartUTC)
-
-	rule, err := ruleInLocation(rruleProp.Value, dtstart)
-	if err != nil {
-		return nil, err
-	}
-
-	// Collect EXDATE values for exclusion.
-	exdates := make(map[time.Time]bool)
-	for _, p := range vevent.Props.Values("EXDATE") {
-		t, _, _, _ := parseDateTime(&p)
-		exdates[t.UTC()] = true
-	}
 
 	// Bound expansion to the query window. If no window is provided, default
 	// to 1 year from DTSTART to prevent unbounded memory allocation on rules
@@ -52,7 +37,7 @@ func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windo
 
 	// Use an iterator instead of Between() to avoid pre-allocating a
 	// potentially huge slice for rules without COUNT or UNTIL.
-	next := rule.Iterator()
+	next := set.Iterator()
 	var events []calendar.Event
 	count := 0
 
@@ -70,13 +55,15 @@ func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windo
 		if !instUTC.Before(windowEnd) {
 			break
 		}
-		if exdates[instUTC] {
-			continue
-		}
 
 		count++
 		if count > maxExpansions {
 			break
+		}
+
+		if o, ok := overrides.take(instUTC); ok {
+			events = append(events, o)
+			continue
 		}
 
 		e := base
@@ -84,19 +71,66 @@ func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windo
 		e.EndUTC = instUTC.Add(duration)
 		e.RecurringParentUID = base.UID
 		e.InstanceStartUTC = instUTC
-
 		if base.TZID != "" {
-			loc, err := resolveLocation(base.TZID)
-			if err == nil {
-				e.StartLocal = instUTC.In(loc).Format(time.RFC3339)
-				e.EndLocal = e.EndUTC.In(loc).Format(time.RFC3339)
-			}
+			// Render in the series' own location; an RDATE may carry another.
+			e.StartLocal = instUTC.In(dtstart.Location()).Format(time.RFC3339)
+			e.EndLocal = e.EndUTC.In(dtstart.Location()).Format(time.RFC3339)
 		}
 
 		events = append(events, e)
 	}
 
 	return events, nil
+}
+
+// recurrenceSet builds the VEVENT's recurrence set (RFC 5545 §3.8.5): its
+// DTSTART, the RRULE if any, every RDATE, minus every EXDATE. It is the one
+// place a series' instants are defined, so overrides, exclusions and extra
+// dates cannot disagree about which instants exist.
+func recurrenceSet(vevent *ical.Component) (*rrule.Set, time.Time, error) {
+	dtstart, err := recurrenceStart(vevent)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	set := &rrule.Set{}
+	set.DTStart(dtstart)
+	// DTSTART is always the first instance of the set, also when only RDATEs
+	// define the rest. The set iterator drops the duplicate the RRULE yields.
+	set.RDate(dtstart)
+
+	if p := vevent.Props.Get(ical.PropRecurrenceRule); p != nil {
+		opt, err := rrule.StrToROptionInLocation(p.Value, dtstart.Location())
+		if err != nil {
+			return nil, time.Time{}, fmt.Errorf("parse RRULE %q: %w", p.Value, err)
+		}
+		opt.Dtstart = dtstart
+		rule, err := rrule.NewRRule(*opt)
+		if err != nil {
+			return nil, time.Time{}, fmt.Errorf("build RRULE %q: %w", p.Value, err)
+		}
+		set.RRule(rule)
+	}
+
+	for _, p := range vevent.Props.Values(ical.PropRecurrenceDates) {
+		dates, err := parseDateTimeValues(&p)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		for _, d := range dates {
+			set.RDate(d)
+		}
+	}
+	for _, p := range vevent.Props.Values(ical.PropExceptionDates) {
+		dates, err := parseDateTimeValues(&p)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		for _, d := range dates {
+			set.ExDate(d)
+		}
+	}
+	return set, dtstart, nil
 }
 
 // recurrenceStart returns the VEVENT's DTSTART in the event's own location.
@@ -114,16 +148,4 @@ func recurrenceStart(vevent *ical.Component) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse DTSTART %q: %w", p.Value, err)
 	}
 	return start, nil
-}
-
-// ruleInLocation builds the RRULE anchored at dtstart. A floating UNTIL is
-// read in dtstart's location, matching how RFC 5545 relates UNTIL to a
-// zoned DTSTART.
-func ruleInLocation(rruleValue string, dtstart time.Time) (*rrule.RRule, error) {
-	opt, err := rrule.StrToROptionInLocation(rruleValue, dtstart.Location())
-	if err != nil {
-		return nil, fmt.Errorf("parse RRULE %q: %w", rruleValue, err)
-	}
-	opt.Dtstart = dtstart
-	return rrule.NewRRule(*opt)
 }
