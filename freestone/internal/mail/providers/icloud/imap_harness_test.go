@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"slices"
 	"strconv"
@@ -151,7 +152,16 @@ func (h *imapHarness) driver() *Driver {
 			var d net.Dialer
 			return d.DialContext(ctx, "tcp", addr)
 		},
+		log: slog.New(slog.NewTextHandler(testLogWriter{h.t}, nil)),
 	}
+}
+
+// testLogWriter sends driver log lines to the test log.
+type testLogWriter struct{ t *testing.T }
+
+func (w testLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
 }
 
 // seed stores a raw RFC 5322 message in mailbox with the given flags and

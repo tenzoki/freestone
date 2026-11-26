@@ -99,7 +99,7 @@ func runServe(args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve icloud mail secret: %w", err)
 		}
-		drv := icloudmail.New(ic.Host, ic.Port, ic.Username, password, ic.DraftsMailbox)
+		drv := icloudmail.New(ic.Host, ic.Port, ic.Username, password, ic.DraftsMailbox, log)
 		mailProviders = append(mailProviders, drv)
 	}
 	if g := cfg.Mail.Google; g != nil {

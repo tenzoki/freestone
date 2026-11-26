@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"time"
@@ -29,10 +30,13 @@ type Driver struct {
 	// dial opens the connection to the IMAP server. New installs a TLS dial
 	// to addr; tests inject a plain TCP dial to an in-process server.
 	dial func(ctx context.Context) (net.Conn, error)
+	// log records session cleanup failures (LOGOUT, close) that must stay
+	// visible but must not turn a completed operation into an error.
+	log *slog.Logger
 }
 
 // New creates a new iCloud mail driver.
-func New(host string, port int, username, password, draftsMailbox string) *Driver {
+func New(host string, port int, username, password, draftsMailbox string, log *slog.Logger) *Driver {
 	if draftsMailbox == "" {
 		draftsMailbox = "Drafts"
 	}
@@ -42,6 +46,7 @@ func New(host string, port int, username, password, draftsMailbox string) *Drive
 		username:      username,
 		password:      password,
 		draftsMailbox: draftsMailbox,
+		log:           log,
 		dial: func(ctx context.Context) (net.Conn, error) {
 			return dialTLS(ctx, addr)
 		},
@@ -67,389 +72,420 @@ func dialTLS(ctx context.Context, addr string) (net.Conn, error) {
 	return dialer.DialContext(ctx, "tcp", addr)
 }
 
-// connect dials the server, logs in, and returns the client. The caller
-// must call Logout when done.
-func (d *Driver) connect(ctx context.Context) (*imapclient.Client, error) {
+// session runs fn on a fresh, logged-in connection and ends the session.
+//
+// go-imap v2 takes no context, and connection deadlines cannot carry one:
+// the library resets the read deadline for every response. So cancellation
+// reaches the connection by closing it: an AfterFunc registered right after
+// the dial, before LOGIN, so that a stalled login is cancellable as well.
+// Closing makes the blocked command return, and the returned error then
+// wraps ctx.Err(), so a timeout reads as a timeout rather than as a closed
+// connection.
+//
+// The result is fn's: a LOGOUT or close failure after fn has returned is
+// logged, never returned. A completed write such as an APPEND must not be
+// reported as failed, or a caller that retries on error writes it twice.
+func (d *Driver) session(ctx context.Context, op string, fn func(c *imapclient.Client) error) error {
 	conn, err := d.dial(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("icloud-mail: dial %s: %w", d.addr, err)
+		return fmt.Errorf("icloud-mail: dial %s: %w", d.addr, err)
 	}
 
 	// The word decoder makes envelope subjects and address names in
 	// ISO-8859-1, Windows-1252 and other charsets arrive decoded; the
 	// library's default decodes UTF-8 and US-ASCII only.
 	c := imapclient.New(conn, &imapclient.Options{WordDecoder: rfc5322.WordDecoder()})
+	stop := context.AfterFunc(ctx, func() {
+		// A close error here is the same one the cleanup below sees and logs.
+		_ = c.Close()
+	})
 
-	if err := c.Login(d.username, d.password).Wait(); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("icloud-mail: login: %w", err)
+	opErr := c.Login(d.username, d.password).Wait()
+	if opErr != nil {
+		opErr = fmt.Errorf("icloud-mail: login: %w", opErr)
+	} else {
+		opErr = fn(c)
 	}
-	return c, nil
+
+	// stop reports false once the AfterFunc has started: the context is done
+	// and the connection is being closed, so LOGOUT cannot be sent.
+	cancelled := !stop()
+	d.endSession(c, op, cancelled, opErr == nil)
+
+	if opErr != nil && ctx.Err() != nil {
+		return fmt.Errorf("icloud-mail: %s: %w: %w", op, ctx.Err(), opErr)
+	}
+	return opErr
 }
 
-// logout ends the session and joins a LOGOUT failure into *errp, so it is
-// reported rather than dropped. It must run at function exit: calling
-// c.Logout() directly in a defer statement would send LOGOUT before the
-// method's own commands.
-func logout(c *imapclient.Client, errp *error) {
-	if err := c.Logout().Wait(); err != nil {
-		*errp = errors.Join(*errp, fmt.Errorf("icloud-mail: logout: %w", err))
+// endSession logs out when the session is still usable and closes the
+// connection. Failures are logged: they cannot change the operation's outcome.
+func (d *Driver) endSession(c *imapclient.Client, op string, cancelled, opSucceeded bool) {
+	if !cancelled && c.State() != imap.ConnStateLogout {
+		if err := c.Logout().Wait(); err != nil {
+			d.log.Warn("icloud-mail: logout failed", "op", op, "op_succeeded", opSucceeded, "err", err)
+		}
+	}
+	// After a cancellation the AfterFunc has already closed the client, and
+	// a second Close reports net.ErrClosed by design.
+	if err := c.Close(); err != nil && !(cancelled && errors.Is(err, net.ErrClosed)) {
+		d.log.Warn("icloud-mail: close connection failed", "op", op, "op_succeeded", opSucceeded, "err", err)
 	}
 }
 
-func (d *Driver) ListMailboxes(ctx context.Context) (_ []mail.Mailbox, err error) {
-	c, err := d.connect(ctx)
+func (d *Driver) ListMailboxes(ctx context.Context) ([]mail.Mailbox, error) {
+	var result []mail.Mailbox
+	err := d.session(ctx, "list mailboxes", func(c *imapclient.Client) error {
+		listCmd := c.List("", "*", &imap.ListOptions{
+			ReturnStatus: &imap.StatusOptions{
+				NumMessages: true,
+				NumUnseen:   true,
+			},
+		})
+
+		for {
+			mbox := listCmd.Next()
+			if mbox == nil {
+				break
+			}
+
+			mb := mail.Mailbox{
+				Provider:  "icloud",
+				ID:        mbox.Mailbox,
+				Name:      mbox.Mailbox,
+				Delimiter: string(mbox.Delim),
+			}
+			for _, a := range mbox.Attrs {
+				mb.Attributes = append(mb.Attributes, string(a))
+			}
+			if mbox.Status != nil {
+				if mbox.Status.NumMessages != nil {
+					mb.Messages = *mbox.Status.NumMessages
+				}
+				if mbox.Status.NumUnseen != nil {
+					mb.Unseen = *mbox.Status.NumUnseen
+				}
+			}
+			result = append(result, mb)
+		}
+
+		if err := listCmd.Close(); err != nil {
+			return fmt.Errorf("icloud-mail: list: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { logout(c, &err) }()
-
-	listCmd := c.List("", "*", &imap.ListOptions{
-		ReturnStatus: &imap.StatusOptions{
-			NumMessages: true,
-			NumUnseen:   true,
-		},
-	})
-
-	var result []mail.Mailbox
-	for {
-		mbox := listCmd.Next()
-		if mbox == nil {
-			break
-		}
-
-		mb := mail.Mailbox{
-			Provider:  "icloud",
-			ID:        mbox.Mailbox,
-			Name:      mbox.Mailbox,
-			Delimiter: string(mbox.Delim),
-		}
-		for _, a := range mbox.Attrs {
-			mb.Attributes = append(mb.Attributes, string(a))
-		}
-		if mbox.Status != nil {
-			if mbox.Status.NumMessages != nil {
-				mb.Messages = *mbox.Status.NumMessages
-			}
-			if mbox.Status.NumUnseen != nil {
-				mb.Unseen = *mbox.Status.NumUnseen
-			}
-		}
-		result = append(result, mb)
-	}
-
-	if err := listCmd.Close(); err != nil {
-		return nil, fmt.Errorf("icloud-mail: list: %w", err)
-	}
-
 	return result, nil
 }
 
-func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) (_ []mail.MessageSummary, err error) {
-	c, err := d.connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { logout(c, &err) }()
-
+func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.MessageSummary, error) {
 	mboxID := q.MailboxID
 	if mboxID == "" {
 		mboxID = "INBOX"
 	}
 
-	if _, err := c.Select(mboxID, nil).Wait(); err != nil {
-		return nil, fmt.Errorf("icloud-mail: select %s: %w", mboxID, err)
-	}
-
-	criteria := buildSearchCriteria(q)
-	searchData, err := c.UIDSearch(criteria, nil).Wait()
-	if err != nil {
-		return nil, fmt.Errorf("icloud-mail: search: %w", err)
-	}
-
-	uids := searchData.AllUIDs()
-	if len(uids) == 0 {
-		return nil, nil
-	}
-
-	limit := q.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-	if len(uids) > limit {
-		uids = uids[len(uids)-limit:]
-	}
-
-	uidSet := imap.UIDSetNum(uids...)
-	fetchOptions := &imap.FetchOptions{
-		Envelope:     true,
-		Flags:        true,
-		UID:          true,
-		InternalDate: true,
-		RFC822Size:   true,
-	}
-
-	fetchCmd := c.Fetch(uidSet, fetchOptions)
-
 	var result []mail.MessageSummary
-	for {
-		msgData := fetchCmd.Next()
-		if msgData == nil {
-			break
+	err := d.session(ctx, "list messages", func(c *imapclient.Client) error {
+		if _, err := c.Select(mboxID, nil).Wait(); err != nil {
+			return fmt.Errorf("icloud-mail: select %s: %w", mboxID, err)
 		}
 
-		var buf imapclient.FetchMessageBuffer
-		// Consume all items from the streaming response.
+		criteria := buildSearchCriteria(q)
+		searchData, err := c.UIDSearch(criteria, nil).Wait()
+		if err != nil {
+			return fmt.Errorf("icloud-mail: search: %w", err)
+		}
+
+		uids := searchData.AllUIDs()
+		if len(uids) == 0 {
+			return nil
+		}
+
+		limit := q.Limit
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		if len(uids) > limit {
+			uids = uids[len(uids)-limit:]
+		}
+
+		uidSet := imap.UIDSetNum(uids...)
+		fetchOptions := &imap.FetchOptions{
+			Envelope:     true,
+			Flags:        true,
+			UID:          true,
+			InternalDate: true,
+			RFC822Size:   true,
+		}
+
+		fetchCmd := c.Fetch(uidSet, fetchOptions)
+
+		for {
+			msgData := fetchCmd.Next()
+			if msgData == nil {
+				break
+			}
+
+			var buf imapclient.FetchMessageBuffer
+			// Consume all items from the streaming response.
+			for {
+				item := msgData.Next()
+				if item == nil {
+					break
+				}
+				switch data := item.(type) {
+				case imapclient.FetchItemDataUID:
+					buf.UID = imap.UID(data.UID)
+				case imapclient.FetchItemDataFlags:
+					buf.Flags = data.Flags
+				case imapclient.FetchItemDataEnvelope:
+					buf.Envelope = data.Envelope
+				case imapclient.FetchItemDataInternalDate:
+					buf.InternalDate = data.Time
+				case imapclient.FetchItemDataRFC822Size:
+					buf.RFC822Size = data.Size
+				}
+			}
+
+			ms := mail.MessageSummary{
+				Provider:  "icloud",
+				MailboxID: mboxID,
+				ID:        strconv.FormatUint(uint64(buf.UID), 10),
+				Date:      buf.InternalDate,
+				Size:      uint32(buf.RFC822Size),
+			}
+			if buf.Envelope != nil {
+				ms.Subject = buf.Envelope.Subject
+				if len(buf.Envelope.From) > 0 {
+					ms.From = formatAddress(buf.Envelope.From[0])
+				}
+				for _, to := range buf.Envelope.To {
+					ms.To = append(ms.To, formatAddress(to))
+				}
+			}
+			for _, f := range buf.Flags {
+				ms.Flags = append(ms.Flags, string(f))
+			}
+			result = append(result, ms)
+		}
+
+		if err := fetchCmd.Close(); err != nil {
+			return fmt.Errorf("icloud-mail: fetch: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Message, error) {
+	if mailboxID == "" {
+		mailboxID = "INBOX"
+	}
+
+	var msg *mail.Message
+	err := d.session(ctx, "get message", func(c *imapclient.Client) error {
+		if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
+			return fmt.Errorf("icloud-mail: select %s: %w", mailboxID, err)
+		}
+
+		uid, err := strconv.ParseUint(id, 10, 32)
+		if err != nil {
+			return fmt.Errorf("icloud-mail: invalid message ID %q: %w", id, err)
+		}
+
+		uidSet := imap.UIDSetNum(imap.UID(uid))
+		// Peek: reading a message must not mark it read; only MarkRead sets \Seen.
+		bodySection := &imap.FetchItemBodySection{Peek: true}
+		fetchOptions := &imap.FetchOptions{
+			Envelope:     true,
+			Flags:        true,
+			UID:          true,
+			InternalDate: true,
+			RFC822Size:   true,
+			BodySection:  []*imap.FetchItemBodySection{bodySection},
+		}
+
+		fetchCmd := c.Fetch(uidSet, fetchOptions)
+
+		msgData := fetchCmd.Next()
+		if msgData == nil {
+			fetchCmd.Close()
+			return fmt.Errorf("icloud-mail: message %s not found", id)
+		}
+
+		m := &mail.Message{
+			MessageSummary: mail.MessageSummary{
+				Provider:  "icloud",
+				MailboxID: mailboxID,
+				ID:        id,
+			},
+		}
+
+		var gotBody bool
+		var decodeErr error
 		for {
 			item := msgData.Next()
 			if item == nil {
 				break
 			}
 			switch data := item.(type) {
-			case imapclient.FetchItemDataUID:
-				buf.UID = imap.UID(data.UID)
-			case imapclient.FetchItemDataFlags:
-				buf.Flags = data.Flags
 			case imapclient.FetchItemDataEnvelope:
-				buf.Envelope = data.Envelope
+				m.Subject = data.Envelope.Subject
+				if len(data.Envelope.From) > 0 {
+					m.From = formatAddress(data.Envelope.From[0])
+				}
+				for _, to := range data.Envelope.To {
+					m.To = append(m.To, formatAddress(to))
+				}
+			case imapclient.FetchItemDataFlags:
+				for _, f := range data.Flags {
+					m.Flags = append(m.Flags, string(f))
+				}
 			case imapclient.FetchItemDataInternalDate:
-				buf.InternalDate = data.Time
+				m.Date = data.Time
 			case imapclient.FetchItemDataRFC822Size:
-				buf.RFC822Size = data.Size
+				m.Size = uint32(data.Size)
+			case imapclient.FetchItemDataBodySection:
+				if data.Literal == nil {
+					continue
+				}
+				gotBody = true
+				body, err := rfc5322.Decode(data.Literal)
+				if err != nil {
+					decodeErr = fmt.Errorf("icloud-mail: decode message %s: %w", id, err)
+					continue
+				}
+				m.Headers = body.Headers
+				m.Text = body.Text
+				m.HTML = body.HTML
+				m.Warnings = body.Warnings
 			}
 		}
 
-		ms := mail.MessageSummary{
-			Provider:  "icloud",
-			MailboxID: mboxID,
-			ID:        strconv.FormatUint(uint64(buf.UID), 10),
-			Date:      buf.InternalDate,
-			Size:      uint32(buf.RFC822Size),
+		// Close drains whatever a failed decode left unread.
+		if err := fetchCmd.Close(); err != nil {
+			return fmt.Errorf("icloud-mail: fetch %s: %w", id, err)
 		}
-		if buf.Envelope != nil {
-			ms.Subject = buf.Envelope.Subject
-			if len(buf.Envelope.From) > 0 {
-				ms.From = formatAddress(buf.Envelope.From[0])
-			}
-			for _, to := range buf.Envelope.To {
-				ms.To = append(ms.To, formatAddress(to))
-			}
+		if decodeErr != nil {
+			return decodeErr
 		}
-		for _, f := range buf.Flags {
-			ms.Flags = append(ms.Flags, string(f))
+		if !gotBody {
+			return fmt.Errorf("icloud-mail: message %s: server returned no body", id)
 		}
-		result = append(result, ms)
-	}
-
-	if err := fetchCmd.Close(); err != nil {
-		return nil, fmt.Errorf("icloud-mail: fetch: %w", err)
-	}
-	return result, nil
-}
-
-func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (_ *mail.Message, err error) {
-	c, err := d.connect(ctx)
+		msg = m
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	defer func() { logout(c, &err) }()
-
-	if mailboxID == "" {
-		mailboxID = "INBOX"
-	}
-	if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
-		return nil, fmt.Errorf("icloud-mail: select %s: %w", mailboxID, err)
-	}
-
-	uid, err := strconv.ParseUint(id, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("icloud-mail: invalid message ID %q: %w", id, err)
-	}
-
-	uidSet := imap.UIDSetNum(imap.UID(uid))
-	// Peek: reading a message must not mark it read; only MarkRead sets \Seen.
-	bodySection := &imap.FetchItemBodySection{Peek: true}
-	fetchOptions := &imap.FetchOptions{
-		Envelope:     true,
-		Flags:        true,
-		UID:          true,
-		InternalDate: true,
-		RFC822Size:   true,
-		BodySection:  []*imap.FetchItemBodySection{bodySection},
-	}
-
-	fetchCmd := c.Fetch(uidSet, fetchOptions)
-
-	msgData := fetchCmd.Next()
-	if msgData == nil {
-		fetchCmd.Close()
-		return nil, fmt.Errorf("icloud-mail: message %s not found", id)
-	}
-
-	msg := &mail.Message{
-		MessageSummary: mail.MessageSummary{
-			Provider:  "icloud",
-			MailboxID: mailboxID,
-			ID:        id,
-		},
-	}
-
-	var gotBody bool
-	var decodeErr error
-	for {
-		item := msgData.Next()
-		if item == nil {
-			break
-		}
-		switch data := item.(type) {
-		case imapclient.FetchItemDataEnvelope:
-			msg.Subject = data.Envelope.Subject
-			if len(data.Envelope.From) > 0 {
-				msg.From = formatAddress(data.Envelope.From[0])
-			}
-			for _, to := range data.Envelope.To {
-				msg.To = append(msg.To, formatAddress(to))
-			}
-		case imapclient.FetchItemDataFlags:
-			for _, f := range data.Flags {
-				msg.Flags = append(msg.Flags, string(f))
-			}
-		case imapclient.FetchItemDataInternalDate:
-			msg.Date = data.Time
-		case imapclient.FetchItemDataRFC822Size:
-			msg.Size = uint32(data.Size)
-		case imapclient.FetchItemDataBodySection:
-			if data.Literal == nil {
-				continue
-			}
-			gotBody = true
-			body, err := rfc5322.Decode(data.Literal)
-			if err != nil {
-				decodeErr = fmt.Errorf("icloud-mail: decode message %s: %w", id, err)
-				continue
-			}
-			msg.Headers = body.Headers
-			msg.Text = body.Text
-			msg.HTML = body.HTML
-			msg.Warnings = body.Warnings
-		}
-	}
-
-	// Close drains whatever a failed decode left unread.
-	if err := fetchCmd.Close(); err != nil {
-		return nil, fmt.Errorf("icloud-mail: fetch %s: %w", id, err)
-	}
-	if decodeErr != nil {
-		return nil, decodeErr
-	}
-	if !gotBody {
-		return nil, fmt.Errorf("icloud-mail: message %s: server returned no body", id)
 	}
 	return msg, nil
 }
 
-func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (_ string, err error) {
-	c, err := d.connect(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer func() { logout(c, &err) }()
-
-	// If replying, fetch the original message's Message-ID for threading.
-	var inReplyToMsgID string
-	if draft.InReplyToID != "" {
-		mailboxID := draft.InReplyToMailboxID
-		if mailboxID == "" {
-			mailboxID = "INBOX"
-		}
-		if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
-			return "", fmt.Errorf("icloud-mail: select %s for reply: %w", mailboxID, err)
-		}
-		origUID, parseErr := strconv.ParseUint(draft.InReplyToID, 10, 32)
-		if parseErr == nil {
-			uidSet := imap.UIDSetNum(imap.UID(origUID))
-			fetchOpts := &imap.FetchOptions{Envelope: true}
-			fetchCmd := c.Fetch(uidSet, fetchOpts)
-			if msgData := fetchCmd.Next(); msgData != nil {
-				for {
-					item := msgData.Next()
-					if item == nil {
-						break
-					}
-					if envData, ok := item.(imapclient.FetchItemDataEnvelope); ok {
-						if envData.Envelope != nil {
-							inReplyToMsgID = envData.Envelope.MessageID
+func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (string, error) {
+	var draftID string
+	err := d.session(ctx, "save draft reply", func(c *imapclient.Client) error {
+		// If replying, fetch the original message's Message-ID for threading.
+		var inReplyToMsgID string
+		if draft.InReplyToID != "" {
+			mailboxID := draft.InReplyToMailboxID
+			if mailboxID == "" {
+				mailboxID = "INBOX"
+			}
+			if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
+				return fmt.Errorf("icloud-mail: select %s for reply: %w", mailboxID, err)
+			}
+			origUID, parseErr := strconv.ParseUint(draft.InReplyToID, 10, 32)
+			if parseErr == nil {
+				uidSet := imap.UIDSetNum(imap.UID(origUID))
+				fetchOpts := &imap.FetchOptions{Envelope: true}
+				fetchCmd := c.Fetch(uidSet, fetchOpts)
+				if msgData := fetchCmd.Next(); msgData != nil {
+					for {
+						item := msgData.Next()
+						if item == nil {
+							break
+						}
+						if envData, ok := item.(imapclient.FetchItemDataEnvelope); ok {
+							if envData.Envelope != nil {
+								inReplyToMsgID = envData.Envelope.MessageID
+							}
 						}
 					}
 				}
+				fetchCmd.Close()
 			}
-			fetchCmd.Close()
 		}
-	}
 
-	body, err := encodeDraftReply(draft, inReplyToMsgID)
+		body, err := encodeDraftReply(draft, inReplyToMsgID)
+		if err != nil {
+			return fmt.Errorf("icloud-mail: encode draft: %w", err)
+		}
+
+		appendCmd := c.Append(d.draftsMailbox, int64(len(body)), nil)
+		if _, err := appendCmd.Write(body); err != nil {
+			return fmt.Errorf("icloud-mail: append write: %w", err)
+		}
+		if err := appendCmd.Close(); err != nil {
+			return fmt.Errorf("icloud-mail: append close: %w", err)
+		}
+		data, err := appendCmd.Wait()
+		if err != nil {
+			return fmt.Errorf("icloud-mail: append: %w", err)
+		}
+
+		// Return the new UID if the server provides it (UIDPLUS extension).
+		if data != nil && data.UID != 0 {
+			draftID = strconv.FormatUint(uint64(data.UID), 10)
+		}
+		return nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("icloud-mail: encode draft: %w", err)
+		return "", err
 	}
-
-	appendCmd := c.Append(d.draftsMailbox, int64(len(body)), nil)
-	if _, err := appendCmd.Write(body); err != nil {
-		return "", fmt.Errorf("icloud-mail: append write: %w", err)
-	}
-	if err := appendCmd.Close(); err != nil {
-		return "", fmt.Errorf("icloud-mail: append close: %w", err)
-	}
-	data, err := appendCmd.Wait()
-	if err != nil {
-		return "", fmt.Errorf("icloud-mail: append: %w", err)
-	}
-
-	// Return the new UID if the server provides it (UIDPLUS extension).
-	if data != nil && data.UID != 0 {
-		return strconv.FormatUint(uint64(data.UID), 10), nil
-	}
-	return "", nil
+	return draftID, nil
 }
 
-func (d *Driver) MarkRead(ctx context.Context, mailboxID, id string) (err error) {
-	c, err := d.connect(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { logout(c, &err) }()
-
+func (d *Driver) MarkRead(ctx context.Context, mailboxID, id string) error {
 	if mailboxID == "" {
 		mailboxID = "INBOX"
 	}
-	if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
-		return fmt.Errorf("icloud-mail: select %s: %w", mailboxID, err)
-	}
 
-	uid, err := strconv.ParseUint(id, 10, 32)
-	if err != nil {
-		return fmt.Errorf("icloud-mail: invalid message ID %q: %w", id, err)
-	}
-
-	uidSet := imap.UIDSetNum(imap.UID(uid))
-	storeFlags := &imap.StoreFlags{
-		Op:     imap.StoreFlagsAdd,
-		Silent: true,
-		Flags:  []imap.Flag{imap.FlagSeen},
-	}
-	storeCmd := c.Store(uidSet, storeFlags, nil)
-	// Drain the command response.
-	for {
-		if storeCmd.Next() == nil {
-			break
+	return d.session(ctx, "mark read", func(c *imapclient.Client) error {
+		if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
+			return fmt.Errorf("icloud-mail: select %s: %w", mailboxID, err)
 		}
-	}
-	if err := storeCmd.Close(); err != nil {
-		return fmt.Errorf("icloud-mail: mark read %s: %w", id, err)
-	}
-	return nil
+
+		uid, err := strconv.ParseUint(id, 10, 32)
+		if err != nil {
+			return fmt.Errorf("icloud-mail: invalid message ID %q: %w", id, err)
+		}
+
+		uidSet := imap.UIDSetNum(imap.UID(uid))
+		storeFlags := &imap.StoreFlags{
+			Op:     imap.StoreFlagsAdd,
+			Silent: true,
+			Flags:  []imap.Flag{imap.FlagSeen},
+		}
+		storeCmd := c.Store(uidSet, storeFlags, nil)
+		// Drain the command response.
+		for {
+			if storeCmd.Next() == nil {
+				break
+			}
+		}
+		if err := storeCmd.Close(); err != nil {
+			return fmt.Errorf("icloud-mail: mark read %s: %w", id, err)
+		}
+		return nil
+	})
 }
 
 func buildSearchCriteria(q mail.MessageQuery) *imap.SearchCriteria {
