@@ -7,7 +7,8 @@
 [server]
 # Path to the JSON log file. Leave empty for stderr-only logging.
 log_file = ""
-# audit_file = "/path/to/audit.jsonl"   # Phase 2
+# audit_file is accepted but not used yet: serve writes no audit log.
+# audit_file = "/path/to/audit.jsonl"
 
 # ---------------------------------------------------------------------------
 # Calendar providers
@@ -48,6 +49,8 @@ log_file = ""
 # username       = "your@apple-id.com"
 # secret_ref     = "freestone-icloud-mail"
 # drafts_mailbox = "Drafts"
+# Sender written into saved drafts; defaults to username, which must then be a mail address.
+# from_address   = "Your Name <you@icloud.com>"
 
 # --- Gmail (API v1) ---
 # Shares OAuth2 credentials with Google Calendar if both are enabled.
