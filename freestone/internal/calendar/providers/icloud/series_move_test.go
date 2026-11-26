@@ -145,9 +145,10 @@ func TestUpdateEvent_SeriesMoveShiftsRdate(t *testing.T) {
 	}
 }
 
-// A plain daily series without an end moves exactly: every occurrence is
-// the old one an hour later, verified up to the scan cap.
-func TestUpdateEvent_SeriesMoveOfDailySeriesIsExact(t *testing.T) {
+// An endless daily series moved by a day and an hour is accepted, and each
+// listed occurrence is the old one a day and an hour later, written by one
+// PUT. The comparison runs into the scan bound, which an endless rule may.
+func TestUpdateEvent_SeriesMoveOfEndlessDailySeriesMovesEachListedDay(t *testing.T) {
 	h, d, cal, href, _ := seededSeries(t, berlinSeriesICS("RRULE:FREQ=DAILY\n", ""))
 
 	if err := moveSeries(d, cal, time.Date(2026, 11, 27, 10, 0, 0, 0, berlin), time.Hour); err != nil {
@@ -278,6 +279,134 @@ func TestUpdateEvent_SeriesMoveOfUTCSeries(t *testing.T) {
 	}
 	assertListed(t, listedStarts(t, d, cal, time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC), time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)),
 		"Series@2026-11-26T09:30:00Z", "Series@2026-11-28T09:30:00Z")
+}
+
+// Issue 261126-1212, probe 1: a DATE UNTIL on a timed series bounds the
+// occurrences by their date. Moving 09:00 to 08:00 on the same day changes
+// no date, so UNTIL stays and every occurrence is kept.
+func TestUpdateEvent_SeriesMoveToEarlierTimeKeepsDateUntil(t *testing.T) {
+	h, d, cal, href, _ := seededSeries(t, berlinSeriesICS("RRULE:FREQ=DAILY;UNTIL=20261130\n", ""))
+
+	if err := moveSeries(d, cal, time.Date(2026, 11, 26, 8, 0, 0, 0, berlin), time.Hour); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	if rule, _ := storedProp(t, h, href, 0, ical.PropRecurrenceRule); rule != "FREQ=DAILY;UNTIL=20261130" {
+		t.Errorf("RRULE = %q, want UNTIL kept at 20261130", rule)
+	}
+	assertListed(t, listedStarts(t, d, cal, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)),
+		"Series@2026-11-26T07:00:00Z", "Series@2026-11-27T07:00:00Z", "Series@2026-11-28T07:00:00Z", "Series@2026-11-29T07:00:00Z")
+}
+
+// Issue 261126-1212, probe 2: Thursday 09:00 to Friday 08:00 moves every
+// occurrence one date later, so the DATE UNTIL moves one day, not by the
+// hour as well.
+func TestUpdateEvent_SeriesMoveToNextDayEarlierShiftsDateUntilByDays(t *testing.T) {
+	h, d, cal, href, _ := seededSeries(t, berlinSeriesICS("RRULE:FREQ=DAILY;UNTIL=20261130\n", ""))
+
+	if err := moveSeries(d, cal, time.Date(2026, 11, 27, 8, 0, 0, 0, berlin), time.Hour); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	if rule, _ := storedProp(t, h, href, 0, ical.PropRecurrenceRule); rule != "FREQ=DAILY;UNTIL=20261201" {
+		t.Errorf("RRULE = %q, want UNTIL moved to 20261201", rule)
+	}
+	assertListed(t, listedStarts(t, d, cal, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)),
+		"Series@2026-11-27T07:00:00Z", "Series@2026-11-28T07:00:00Z", "Series@2026-11-29T07:00:00Z", "Series@2026-11-30T07:00:00Z")
+}
+
+// Issue 261126-1212, probe 3: an UNTIL-bounded series with more occurrences
+// than the scan reaches cannot be verified to its end, where a moved bound
+// goes wrong, so the move is refused and nothing is written.
+func TestUpdateEvent_SeriesMovePastScanOfUntilBoundedSeriesIsRefused(t *testing.T) {
+	h, d, cal, href, etag := seededSeries(t, plainSeriesICS("DTSTART:20261126T090000Z\nDTEND:20261126T100000Z\n",
+		"RRULE:FREQ=HOURLY;UNTIL=20400101\n", ""))
+
+	err := moveSeries(d, cal, time.Date(2026, 11, 26, 8, 30, 0, 0, time.UTC), time.Hour)
+	if err == nil {
+		t.Fatal("UpdateEvent of a bounded series longer than the scan: want a refusal")
+	}
+	for _, want := range []string{"nothing was changed", "UNTIL", strconv.Itoa(maxOccurrenceScan)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+	assertNothingWritten(t, h, href, etag)
+}
+
+// The same holds for a COUNT bound beyond the scan.
+func TestUpdateEvent_SeriesMovePastScanOfCountBoundedSeriesIsRefused(t *testing.T) {
+	h, d, cal, href, etag := seededSeries(t, plainSeriesICS("DTSTART:20261126T090000Z\nDTEND:20261126T091000Z\n",
+		"RRULE:FREQ=MINUTELY;COUNT=150000\n", ""))
+
+	err := moveSeries(d, cal, time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC), 10*time.Minute)
+	if err == nil {
+		t.Fatal("UpdateEvent of a COUNT series longer than the scan: want a refusal")
+	}
+	for _, want := range []string{"nothing was changed", "COUNT=150000", strconv.Itoa(maxOccurrenceScan)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+	assertNothingWritten(t, h, href, etag)
+}
+
+// newYorkSeriesICS is a one-hour America/New_York series uid-1 starting
+// Thursday 2026-11-26 19:00 EST, which is 2026-11-27T00:00Z, so a DATE
+// value, read as UTC midnight, names one of its occurrences.
+func newYorkSeriesICS(recurrence string) string {
+	return plainSeriesICS("DTSTART;TZID=America/New_York:20261126T190000\nDTEND;TZID=America/New_York:20261126T200000\n", recurrence, "")
+}
+
+// A DATE EXDATE on a timed series moves by the days of the shift. West of
+// UTC its UTC midnight falls on the previous local date; moving it on the
+// local wall clock left it on its old date, where it excluded a different
+// occurrence than before and the excluded one came back.
+func TestUpdateEvent_SeriesMoveShiftsDateExdateByDays(t *testing.T) {
+	h, d, cal, href, _ := seededSeries(t, newYorkSeriesICS("RRULE:FREQ=DAILY;COUNT=5\nEXDATE;VALUE=DATE:20261129\n"))
+
+	if err := moveSeries(d, cal, time.Date(2026, 11, 27, 19, 0, 0, 0, newYork(t)), time.Hour); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	if v, _ := storedProp(t, h, href, 0, ical.PropExceptionDates); v != "20261130" {
+		t.Errorf("EXDATE = %q, want 20261130", v)
+	}
+	assertListed(t, listedStarts(t, d, cal, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)),
+		"Series@2026-11-28T00:00:00Z", "Series@2026-11-29T00:00:00Z", "Series@2026-12-01T00:00:00Z", "Series@2026-12-02T00:00:00Z")
+}
+
+// A DATE RDATE on a timed series moves by the days of the shift, so a move
+// by whole days carries its extra occurrence exactly.
+func TestUpdateEvent_SeriesMoveShiftsDateRdateByDays(t *testing.T) {
+	h, d, cal, href, _ := seededSeries(t, newYorkSeriesICS("RRULE:FREQ=DAILY;COUNT=3\nRDATE;VALUE=DATE:20261205\n"))
+
+	if err := moveSeries(d, cal, time.Date(2026, 11, 27, 19, 0, 0, 0, newYork(t)), time.Hour); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	if v, _ := storedProp(t, h, href, 0, ical.PropRecurrenceDates); v != "20261206" {
+		t.Errorf("RDATE = %q, want 20261206", v)
+	}
+	assertListed(t, listedStarts(t, d, cal, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)),
+		"Series@2026-11-28T00:00:00Z", "Series@2026-11-29T00:00:00Z", "Series@2026-11-30T00:00:00Z", "Series@2026-12-06T00:00:00Z")
+}
+
+// A time-of-day move cannot carry a DATE RDATE, which has no time to move,
+// so the verification refuses it and nothing is written.
+func TestUpdateEvent_SeriesTimeMoveWithDateRdateIsRefused(t *testing.T) {
+	h, d, cal, href, etag := seededSeries(t, newYorkSeriesICS("RRULE:FREQ=DAILY;COUNT=3\nRDATE;VALUE=DATE:20261205\n"))
+
+	err := moveSeries(d, cal, time.Date(2026, 11, 26, 20, 0, 0, 0, newYork(t)), time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "cannot be carried over exactly") {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+	assertNothingWritten(t, h, href, etag)
+}
+
+func newYork(t *testing.T) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loc
 }
 
 // Issue 261126-1156 (F2), the single-occurrence delete's write path: a

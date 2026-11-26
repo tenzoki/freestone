@@ -215,6 +215,15 @@ func wallShiftBetween(from, to time.Time) wallShift {
 
 func (w wallShift) zero() bool { return w.days == 0 && w.clock == 0 }
 
+// applyToDate moves a DATE value by the shift's whole days only. A date has
+// no time of day for the clock part to move; running it through the wall
+// clock instead pulls it to the previous date on an earlier time, or west
+// of UTC, where a DATE's UTC midnight is the evening before.
+func (w wallShift) applyToDate(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d+w.days, 0, 0, 0, 0, t.Location())
+}
+
 // apply moves t on the wall clock of its own location. time.Date
 // normalises the sum, so a clock change past midnight rolls the date, and
 // an hour lost or gained at a daylight-saving change is not counted.
@@ -229,16 +238,19 @@ func (w wallShift) apply(t time.Time) time.Time {
 // series had before the move.
 //
 // Every RDATE, EXDATE and RECURRENCE-ID value and the RRULE's UNTIL bound
-// is moved by w on the series' wall clock, each in its own form. The rule's
+// is moved by w on the series' wall clock, each in its own form; a DATE
+// value moves by w's whole days only, as it has no time of day. The rule's
 // other parts are not rewritten, so a part that pins a day, month, hour or
 // minute (BYDAY, BYMONTHDAY, BYHOUR, ...) may no longer agree with the moved
 // DTSTART, as a weekly Thursday series moved to a Friday shows. The move is
 // therefore accepted only when the moved series generates exactly the old
 // series' occurrences, each moved by w, compared one by one through both
-// sets' iterators for up to maxOccurrenceScan occurrences, and when every
-// moved override and exclusion still names an occurrence. Otherwise it is
-// refused; the caller writes nothing, since only the in-memory copy has
-// been edited.
+// sets' iterators to their ends, and when every moved override and
+// exclusion still names an occurrence. A series longer than
+// maxOccurrenceScan is accepted only if its rule is endless, as the end of
+// a bounded one, where a moved bound goes wrong, lies past the scan.
+// Otherwise the move is refused; the caller writes nothing, since only the
+// in-memory copy has been edited.
 func shiftSeries(s *series, w wallShift, seriesLoc, floating *time.Location, before *rrule.Set) error {
 	if w.zero() {
 		return nil
@@ -307,8 +319,13 @@ func shiftSeries(s *series, w wallShift, seriesLoc, floating *time.Location, bef
 
 // shiftMismatch walks the series' generated set before and after a move in
 // step and returns, in words, the first occurrence that is not the old one
-// moved by w; "" when the sets agree for as far as both reach, up to
-// maxOccurrenceScan occurrences. Iterator() is used, never Between().
+// moved by w, or why the walk could not decide; "" when both sets end
+// together with every occurrence matched. A walk that reaches
+// maxOccurrenceScan is accepted only when both sets are endless (an RRULE
+// without UNTIL or COUNT), for which a bounded walk is the best proof there
+// is; a bounded set not walked to its end is refused, since its end is
+// where a moved UNTIL or COUNT would lose or add occurrences. Iterator() is
+// used, never Between().
 func shiftMismatch(before, after *rrule.Set, w wallShift, seriesLoc *time.Location, show func(time.Time) string) string {
 	nextBefore, nextAfter := before.Iterator(), after.Iterator()
 	for i := 0; i < maxOccurrenceScan; i++ {
@@ -326,7 +343,31 @@ func shiftMismatch(before, after *rrule.Set, w wallShift, seriesLoc *time.Locati
 			return fmt.Sprintf("its occurrence at %s would move to %s, but the moved series generates %s in its place", show(b), show(want), show(a))
 		}
 	}
-	return ""
+	if endless(before) && endless(after) {
+		return ""
+	}
+	return fmt.Sprintf("the series ends at %s but has more than %d occurrences, the most a move is verified over, so the move cannot be verified to the series' end", setBound(before, show), maxOccurrenceScan)
+}
+
+// endless reports whether set has no last occurrence: an RRULE without
+// UNTIL or COUNT. RDATEs alone are always finite.
+func endless(set *rrule.Set) bool {
+	r := set.GetRRule()
+	return r != nil && r.OrigOptions.Count == 0 && r.OrigOptions.Until.IsZero()
+}
+
+// setBound names what ends a set that is not endless: its rule's COUNT or
+// UNTIL, or, without a rule, its RDATEs.
+func setBound(set *rrule.Set, show func(time.Time) string) string {
+	r := set.GetRRule()
+	switch {
+	case r == nil:
+		return "its last RDATE"
+	case r.OrigOptions.Count > 0:
+		return fmt.Sprintf("its rule's COUNT=%d", r.OrigOptions.Count)
+	default:
+		return "its rule's UNTIL " + show(r.OrigOptions.Until)
+	}
 }
 
 // pinningRuleParts names the RRULE parts of props that pin an occurrence
@@ -355,7 +396,7 @@ type shiftedValue struct {
 
 // shiftValues rewrites every value of the date-time properties called name
 // moved by w on the series' wall clock, each in its own property's form,
-// and returns each value before and after.
+// a DATE by w's whole days, and returns each value before and after.
 func shiftValues(props ical.Props, name string, w wallShift, seriesLoc, floating *time.Location) ([]shiftedValue, error) {
 	var moved []shiftedValue
 	list := props[name]
@@ -371,11 +412,12 @@ func shiftValues(props ical.Props, name string, w wallShift, seriesLoc, floating
 			if err != nil {
 				return nil, fmt.Errorf("parse %s %q: %w", name, v, err)
 			}
-			shifted := w.apply(t.In(seriesLoc))
+			var shifted time.Time
 			if date {
+				shifted = w.applyToDate(t)
 				values[j] = shifted.Format("20060102")
-				shifted = wallDate(shifted)
 			} else {
+				shifted = w.apply(t.In(seriesLoc))
 				loc, utc, err := dateTimeZone(v, p.Params, floating)
 				if err != nil {
 					return nil, err
@@ -395,8 +437,11 @@ func shiftValues(props ical.Props, name string, w wallShift, seriesLoc, floating
 
 // shiftUntil moves the RRULE's UNTIL bound by w on the series' wall clock,
 // in UNTIL's own form: a DATE, a UTC DATE-TIME, or a local one. It is read
-// as rrule-go reads it, a DATE or local value in the series' location, so
-// the moved bound still admits the moved last occurrence.
+// as rrule-go reads it, a DATE or local value in the series' location. A
+// DATE bound moves by w's whole days only: rrule-go reads it as the start
+// of its date, so it admits the occurrences on earlier dates, and moving it
+// by the days each occurrence's date moves keeps the same ones in the
+// common case. shiftMismatch decides whether it does.
 func shiftUntil(props ical.Props, w wallShift, seriesLoc *time.Location) error {
 	p := props.Get(ical.PropRecurrenceRule)
 	if p == nil {
@@ -425,9 +470,14 @@ func shiftUntil(props ical.Props, w wallShift, seriesLoc *time.Location) error {
 		if err != nil {
 			return fmt.Errorf("parse RRULE UNTIL %q: %w", v, err)
 		}
-		shifted := w.apply(t.In(seriesLoc))
-		if layout == dateTimeUTCLayout {
-			shifted = shifted.UTC()
+		var shifted time.Time
+		switch layout {
+		case "20060102":
+			shifted = w.applyToDate(t)
+		case dateTimeUTCLayout:
+			shifted = w.apply(t.In(seriesLoc)).UTC()
+		default:
+			shifted = w.apply(t.In(seriesLoc))
 		}
 		parts[i] = key + "=" + shifted.Format(layout)
 	}
