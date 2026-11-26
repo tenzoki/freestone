@@ -67,4 +67,8 @@ echo "  security add-generic-password -s \"freestone-google-client-id\" -a \"fre
 echo "  security add-generic-password -s \"freestone-google-client-secret\" -a \"freestone\" -w \"YOUR_CLIENT_SECRET\""
 echo "  ${INSTALL_DIR}/${BINARY} auth google"
 echo ""
+echo "  Already authorized with an older build? Run 'auth google' again: the Google"
+echo "  write tools need the calendar.events and gmail.modify scopes, and a token"
+echo "  granted with the old read-only scopes fails every write with 403."
+echo ""
 echo "Done. Run '${INSTALL_DIR}/${BINARY} serve' to start."

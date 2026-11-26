@@ -74,9 +74,14 @@ Run the auth flow to get a refresh token:
 freestone-mcp auth google
 ```
 
-This opens your browser for Google consent. Phase 2 requests read/write scopes:
-- `https://www.googleapis.com/auth/calendar` (read + create/update/delete events)
+This opens your browser for Google consent. freestone requests the narrowest scopes that cover its tools, and only for the Google providers enabled in your config:
+- `https://www.googleapis.com/auth/calendar.calendarlist.readonly` (list calendars)
+- `https://www.googleapis.com/auth/calendar.events` (read + create/update/delete events)
 - `https://www.googleapis.com/auth/gmail.modify` (read + draft save + mark read)
+
+Gmail has no draft-only scope: `gmail.modify` also permits sending and trashing mail. freestone never does either; `internal/mail/guarantee_test.go` fails the build if the mail code ever references a send, delete, trash, move or expunge operation.
+
+**Upgrading from a read-only token.** Tokens authorized before the write tools existed carry only `calendar.readonly` / `gmail.readonly`, and every Google write tool fails with `403 insufficient authentication scopes`. The stored token records no scopes, so freestone cannot detect this at startup. Run `freestone-mcp auth google` again to re-consent.
 
 The refresh token is stored in Keychain under the `token_ref` from your config (default: `freestone-google-token`).
 

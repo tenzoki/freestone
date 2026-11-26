@@ -150,13 +150,10 @@ func googleTokenSource(ctx context.Context, cfg *config.Config, resolver secrets
 	// This function is only called when at least one Google provider is
 	// configured, so at least one of these will be non-nil.
 	var clientIDRef, clientSecretRef, tokenRef string
-	var scopes []string
-
 	if g := cfg.Calendar.Google; g != nil {
 		clientIDRef = g.ClientIDRef
 		clientSecretRef = g.ClientSecretRef
 		tokenRef = g.TokenRef
-		scopes = append(scopes, "https://www.googleapis.com/auth/calendar.readonly")
 	}
 	if g := cfg.Mail.Google; g != nil {
 		if clientIDRef == "" {
@@ -166,7 +163,6 @@ func googleTokenSource(ctx context.Context, cfg *config.Config, resolver secrets
 		if tokenRef == "" {
 			tokenRef = g.TokenRef
 		}
-		scopes = append(scopes, "https://www.googleapis.com/auth/gmail.readonly")
 	}
 
 	clientID, err := resolver.Resolve(clientIDRef)
@@ -178,7 +174,7 @@ func googleTokenSource(ctx context.Context, cfg *config.Config, resolver secrets
 		return nil, fmt.Errorf("resolve google client secret: %w", err)
 	}
 
-	oauthCfg := gauth.NewConfig(clientID, clientSecret, scopes)
+	oauthCfg := gauth.NewConfig(clientID, clientSecret, googleScopes(cfg))
 	return gauth.TokenSource(ctx, oauthCfg, tokenRef, resolver)
 }
 

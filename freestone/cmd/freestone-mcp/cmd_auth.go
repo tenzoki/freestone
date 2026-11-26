@@ -96,14 +96,7 @@ func runAuthGoogle(args []string) error {
 		return fmt.Errorf("resolve client secret: %w", err)
 	}
 
-	// Build scopes based on enabled providers.
-	var scopes []string
-	if gcal != nil {
-		scopes = append(scopes, "https://www.googleapis.com/auth/calendar.readonly")
-	}
-	if gmail != nil {
-		scopes = append(scopes, "https://www.googleapis.com/auth/gmail.readonly")
-	}
+	scopes := googleScopes(cfg)
 
 	oauthCfg := gauth.NewConfig(clientID, clientSecret, scopes)
 
