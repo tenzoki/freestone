@@ -5,6 +5,7 @@ package google
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/calendar/v3"
@@ -59,11 +60,14 @@ func (d *Driver) ListEvents(ctx context.Context, q domain.EventQuery) (domain.Ev
 		SingleEvents(true).
 		OrderBy("startTime")
 
+	// The window is sent as the UTC instant: a layout with a literal "Z"
+	// applied to a time carrying an offset would relabel its wall clock
+	// as UTC and shift the window by that offset.
 	if !q.Start.IsZero() {
-		call = call.TimeMin(q.Start.Format("2006-01-02T15:04:05Z"))
+		call = call.TimeMin(q.Start.UTC().Format(time.RFC3339))
 	}
 	if !q.End.IsZero() {
-		call = call.TimeMax(q.End.Format("2006-01-02T15:04:05Z"))
+		call = call.TimeMax(q.End.UTC().Format(time.RFC3339))
 	}
 
 	var events []domain.Event

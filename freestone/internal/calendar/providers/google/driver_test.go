@@ -1,10 +1,14 @@
 package google
 
 import (
+	"context"
+	"net/http"
 	"testing"
 	"time"
 
 	"google.golang.org/api/calendar/v3"
+
+	domain "github.com/kai/freestone/internal/calendar"
 )
 
 func TestEventFromGoogle_TimedEvent(t *testing.T) {
@@ -191,5 +195,30 @@ func TestParseDateTimeField_NoTimezone(t *testing.T) {
 	}
 	if tzid != "" {
 		t.Errorf("tzid = %q, want empty", tzid)
+	}
+}
+
+// D11: a window given with an offset is sent as its UTC instant, not as
+// its wall clock relabelled "Z".
+func TestListEvents_WindowWithOffsetSentAsUTC(t *testing.T) {
+	h := newCalendarAPIHarness(t)
+	h.respond(http.MethodGet, "/calendars/primary/events", http.StatusOK, &calendar.Events{})
+
+	plusOne := time.FixedZone("+01:00", 60*60)
+	_, err := h.driver().ListEvents(context.Background(), domain.EventQuery{
+		CalendarID: "primary",
+		Start:      time.Date(2026, 11, 26, 0, 0, 0, 0, plusOne),
+		End:        time.Date(2026, 11, 27, 0, 0, 0, 0, plusOne),
+	})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+
+	req := h.only()
+	if got := req.Query.Get("timeMin"); got != "2026-11-25T23:00:00Z" {
+		t.Errorf("timeMin = %q, want 2026-11-25T23:00:00Z", got)
+	}
+	if got := req.Query.Get("timeMax"); got != "2026-11-26T23:00:00Z" {
+		t.Errorf("timeMax = %q, want 2026-11-26T23:00:00Z", got)
 	}
 }
