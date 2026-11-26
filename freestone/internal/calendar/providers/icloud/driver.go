@@ -153,7 +153,7 @@ func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e calendar.
 	}
 
 	path := eventObjectPath(calendarID, uid)
-	obj, err := d.client.PutCalendarObject(ctx, path, cal)
+	obj, err := d.client.PutCalendarObject(ctx, path, cal, nil)
 	if err != nil {
 		return nil, fmt.Errorf("icloud-calendar: create event: %w", err)
 	}
@@ -181,7 +181,7 @@ func (d *Driver) UpdateEvent(ctx context.Context, e calendar.Event) (*calendar.E
 	}
 
 	path := eventObjectPath(e.CalendarID, e.UID)
-	obj, err := d.client.PutCalendarObject(ctx, path, cal)
+	obj, err := d.client.PutCalendarObject(ctx, path, cal, nil)
 	if err != nil {
 		return nil, fmt.Errorf("icloud-calendar: update event %s: %w", e.UID, err)
 	}
@@ -195,7 +195,7 @@ func (d *Driver) UpdateEvent(ctx context.Context, e calendar.Event) (*calendar.E
 
 func (d *Driver) DeleteEvent(ctx context.Context, calendarID, uid, _ string) error {
 	path := eventObjectPath(calendarID, uid)
-	if err := d.client.RemoveAll(ctx, path); err != nil {
+	if err := d.client.RemoveAll(ctx, path, nil); err != nil {
 		return fmt.Errorf("icloud-calendar: delete event %s: %w", uid, err)
 	}
 	return nil

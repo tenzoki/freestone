@@ -7,7 +7,8 @@ require (
 	github.com/emersion/go-ical v0.0.0-20250609112844-439c63cef608
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
-	github.com/emersion/go-webdav v0.7.0
+	github.com/emersion/go-webdav v0.8.0
+	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/teambition/rrule-go v1.8.2
 	golang.org/x/oauth2 v0.36.0
@@ -25,7 +26,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
 	github.com/googleapis/gax-go/v2 v2.21.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
