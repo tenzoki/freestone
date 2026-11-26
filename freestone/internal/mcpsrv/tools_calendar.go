@@ -55,7 +55,7 @@ type updateEventInput struct {
 	Start       *string `json:"start,omitempty" jsonschema:"New start time in RFC3339 format. Give start and end together, or neither to keep the current times. On an all-day event (iCloud or Google) only the date on this value's own wall clock is used and the event stays all-day; end is then the exclusive end date and must fall on a later date."`
 	End         *string `json:"end,omitempty" jsonschema:"New end time in RFC3339 format, after start. Give start and end together, or neither to keep the current times."`
 	ETag        string  `json:"etag,omitempty" jsonschema:"The event's etag as last read, passed back exactly as received. When given, the update is made only if the event is unchanged since then; otherwise the call fails and the event must be re-fetched."`
-	Scope       string  `json:"scope,omitempty" jsonschema:"iCloud only. Which part of a recurring event the update changes. iCloud lists every occurrence of a series under the series uid, so an update of a recurring iCloud event is refused unless scope is \"series\", which changes every occurrence (a time change moves the whole series, its moved and cancelled occurrences included). \"instance\" is refused: single-occurrence edits are not supported on iCloud. Not needed for a non-recurring event. Not accepted for google, where each occurrence has its own uid."`
+	Scope       string  `json:"scope,omitempty" jsonschema:"iCloud only. Which part of a recurring event the update changes. iCloud lists every occurrence of a series under the series uid, so an update of a recurring iCloud event is refused unless scope is \"series\", which changes every occurrence. A start change moves every occurrence by the same wall-clock offset in the series' time zone (its moved and cancelled occurrences, extra dates and UNTIL end included) and is verified to do exactly that; a move the rule cannot follow, such as a weekly Thursday series moved to a Friday, is refused with nothing changed. \"instance\" is refused: single-occurrence edits are not supported on iCloud. Not needed for a non-recurring event. Not accepted for google, where each occurrence has its own uid."`
 }
 
 type deleteEventInput struct {
@@ -206,10 +206,10 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			updated, err := p.UpdateEvent(ctx, patch)
-			auditLog(al, "calendar_update_event", input.Provider, map[string]string{
+			auditLog(al, "calendar_update_event", input.Provider, withGiven(map[string]string{
 				"calendar_id": input.CalendarID,
 				"uid":         input.UID,
-			}, err)
+			}, "scope", input.Scope), err)
 			if err != nil {
 				return errResult(err), nil, nil
 			}
@@ -234,10 +234,10 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			err = p.DeleteEvent(ctx, del)
-			auditLog(al, "calendar_delete_event", input.Provider, map[string]string{
+			auditLog(al, "calendar_delete_event", input.Provider, withGiven(map[string]string{
 				"calendar_id": input.CalendarID,
 				"uid":         input.UID,
-			}, err)
+			}, "scope", input.Scope, "recurrence_id", input.RecurrenceID), err)
 			if err != nil {
 				return errResult(err), nil, nil
 			}
@@ -281,6 +281,19 @@ func parseAllDayDate(s string) (time.Time, error) {
 		}
 	}
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
+}
+
+// withGiven adds each key/value pair whose value is non-empty to inputs
+// and returns it, so an audit entry records an optional input exactly when
+// the caller gave it: a series delete and a one-occurrence delete of the
+// same uid must not audit alike.
+func withGiven(inputs map[string]string, pairs ...string) map[string]string {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if pairs[i+1] != "" {
+			inputs[pairs[i]] = pairs[i+1]
+		}
+	}
+	return inputs
 }
 
 // eventPatchFromInput turns the tool input into a domain patch. Start and

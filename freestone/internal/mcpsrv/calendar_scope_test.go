@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kai/freestone/internal/audit"
 	"github.com/kai/freestone/internal/calendar"
 	"github.com/kai/freestone/internal/mcpsrv"
 )
@@ -154,5 +157,83 @@ func TestCalendarWriteTools_ScopeReachesProvider(t *testing.T) {
 	}
 	if len(rec.patches) != 1 || len(rec.deletions) != 1 {
 		t.Errorf("invalid inputs reached the provider: patches %d, deletions %d", len(rec.patches), len(rec.deletions))
+	}
+}
+
+// Issue 261126-1156 (F3): the audit entries of calendar writes carry scope
+// and recurrence_id when given, so a series delete and a one-occurrence
+// delete of the same uid are told apart; an input not given is not logged.
+func TestCalendarWriteTools_AuditRecordsScopeAndRecurrenceID(t *testing.T) {
+	ctx := context.Background()
+	rec := &scopeRecorder{Fake: &calendar.Fake{ProviderName: "icloud", Events: map[string][]calendar.Event{}}}
+	reg, err := calendar.NewRegistry(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	al, err := audit.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { al.Close() })
+	srv := mcpsrv.Build(mcpsrv.Deps{Calendar: reg, Audit: al, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	go func() { srv.Run(ctx, serverTransport) }()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v1"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+
+	base := map[string]any{"provider": "icloud", "calendar_id": "/cal/", "uid": "uid-1"}
+	calls := []struct {
+		tool  string
+		extra map[string]any
+		want  map[string]string
+	}{
+		{"calendar_update_event", map[string]any{"summary": "x", "scope": "series"},
+			map[string]string{"calendar_id": "/cal/", "uid": "uid-1", "scope": "series"}},
+		{"calendar_delete_event", map[string]any{"scope": "instance", "recurrence_id": "2026-12-03T09:00:00+01:00"},
+			map[string]string{"calendar_id": "/cal/", "uid": "uid-1", "scope": "instance", "recurrence_id": "2026-12-03T09:00:00+01:00"}},
+		{"calendar_delete_event", map[string]any{"scope": "series"},
+			map[string]string{"calendar_id": "/cal/", "uid": "uid-1", "scope": "series"}},
+		{"calendar_delete_event", map[string]any{},
+			map[string]string{"calendar_id": "/cal/", "uid": "uid-1"}},
+	}
+	for _, c := range calls {
+		args := map[string]any{}
+		for k, v := range base {
+			args[k] = v
+		}
+		for k, v := range c.extra {
+			args[k] = v
+		}
+		if r := callTool(t, ctx, session, c.tool, args); r.IsError {
+			t.Fatalf("%s: %s", c.tool, extractText(r))
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != len(calls) {
+		t.Fatalf("audit lines = %d, want %d:\n%s", len(lines), len(calls), data)
+	}
+	for i, line := range lines {
+		var entry audit.Record
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("audit line %d: %v", i, err)
+		}
+		if entry.Tool != calls[i].tool || len(entry.Inputs) != len(calls[i].want) {
+			t.Errorf("audit line %d = %s %v, want %s %v", i, entry.Tool, entry.Inputs, calls[i].tool, calls[i].want)
+			continue
+		}
+		for k, v := range calls[i].want {
+			if entry.Inputs[k] != v {
+				t.Errorf("audit line %d input %s = %q, want %q", i, k, entry.Inputs[k], v)
+			}
+		}
 	}
 }

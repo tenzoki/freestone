@@ -65,6 +65,11 @@ type calDAVHarness struct {
 	// request behave as live iCloud does rather than as RFC 4791 says; see
 	// serveICloudPartialRetrieval. Set it before the first request.
 	icloudPartialRetrieval bool
+
+	// beforePut, if set, runs when a PUT arrives, before the backend sees
+	// it, so a test can change the stored object between the driver's read
+	// and its write. Set it before the first request.
+	beforePut func()
 }
 
 // withICloudPartialRetrieval switches the harness to iCloud's answer for a
@@ -183,6 +188,10 @@ func (h *calDAVHarness) recordAndGuard(next http.Handler) http.Handler {
 		h.mu.Lock()
 		h.requests = append(h.requests, harnessRequest{Method: r.Method, Path: r.URL.Path, IfMatch: ifMatch})
 		h.mu.Unlock()
+
+		if r.Method == http.MethodPut && h.beforePut != nil {
+			h.beforePut()
+		}
 
 		if r.Method == http.MethodDelete && ifMatch != "" {
 			o, exists := h.object(r.URL.Path)

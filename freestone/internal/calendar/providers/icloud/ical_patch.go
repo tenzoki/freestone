@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
+	"github.com/teambition/rrule-go"
 
 	"github.com/kai/freestone/internal/calendar"
 )
@@ -15,9 +16,9 @@ import (
 // (RRULE, VALARM, VTIMEZONE, ATTENDEE parameters, X- properties, overrides)
 // is written back exactly as it was read. It returns the edited VEVENT.
 //
-// A recurring object is edited only under calendar.ScopeSeries, and a time
-// change then moves the series' RECURRENCE-IDs and EXDATEs with it
-// (shiftSeries). DURATION is dropped from any VEVENT that also has DTEND,
+// A recurring object is edited only under calendar.ScopeSeries, and a start
+// change then moves the whole series with it, or is refused when the move
+// cannot be carried exactly (shiftSeries). DURATION is dropped from any VEVENT that also has DTEND,
 // since the object could not be encoded otherwise.
 func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time, floating *time.Location) (*ical.Component, error) {
 	s, err := seriesOf(cal, p.UID)
@@ -35,10 +36,14 @@ func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time, floati
 
 	// The shift is measured before DTSTART is rewritten, on the series'
 	// own wall clock (UTC dates for an all-day series).
+	// The series' occurrences are taken before the move too, so the move
+	// can be checked against them.
 	var shift wallShift
 	var seriesLoc *time.Location
+	var before *rrule.Set
 	if s.recurring() && p.Start != nil {
-		oldStart, err := recurrenceStart(master, floating)
+		var oldStart time.Time
+		before, oldStart, err = generatedSet(master, floating)
 		if err != nil {
 			return nil, err
 		}
@@ -74,7 +79,7 @@ func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time, floati
 	}
 
 	if s.recurring() {
-		if err := shiftSeries(s, shift, seriesLoc, floating); err != nil {
+		if err := shiftSeries(s, shift, seriesLoc, floating, before); err != nil {
 			return nil, err
 		}
 	}
