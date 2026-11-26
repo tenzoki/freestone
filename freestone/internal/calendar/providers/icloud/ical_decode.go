@@ -174,17 +174,24 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string) (calendar.Eve
 	if p := vevent.Props.Get(ical.PropUID); p != nil {
 		e.UID = p.Value
 	}
-	if p := vevent.Props.Get(ical.PropSummary); p != nil {
-		e.Summary = p.Value
-	}
-	if p := vevent.Props.Get(ical.PropDescription); p != nil {
-		e.Description = p.Value
-	}
-	if p := vevent.Props.Get(ical.PropLocation); p != nil {
-		e.Location = p.Value
-	}
-	if p := vevent.Props.Get(ical.PropStatus); p != nil {
-		e.Status = p.Value
+	for _, f := range []struct {
+		name string
+		dst  *string
+	}{
+		{ical.PropSummary, &e.Summary},
+		{ical.PropDescription, &e.Description},
+		{ical.PropLocation, &e.Location},
+		{ical.PropStatus, &e.Status},
+	} {
+		p := vevent.Props.Get(f.name)
+		if p == nil {
+			continue
+		}
+		text, err := textValue(p)
+		if err != nil {
+			return e, fmt.Errorf("parse %s: %w", f.name, err)
+		}
+		*f.dst = text
 	}
 	if p := vevent.Props.Get(ical.PropOrganizer); p != nil {
 		e.Organizer = p.Value
@@ -221,6 +228,19 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string) (calendar.Eve
 	}
 
 	return e, nil
+}
+
+// textValue returns a single-valued TEXT property with its RFC 5545 escapes
+// (\n, \, \; \\) resolved. Prop.Text is not used because it returns only
+// the first element of a comma-separated list, which would cut a value
+// written with a bare comma, as some producers do, at that comma; joining
+// the list back keeps such a comma as the literal it was meant to be.
+func textValue(p *ical.Prop) (string, error) {
+	parts, err := p.TextList()
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(parts, ","), nil
 }
 
 func parseDateTime(p *ical.Prop) (t time.Time, tzid string, allDay bool, err error) {

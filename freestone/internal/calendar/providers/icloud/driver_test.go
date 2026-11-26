@@ -519,3 +519,168 @@ DTEND:20261208T120000Z`)
 		t.Errorf("warnings = %q, want one naming %sbad.ics and the RANGE error", list.Warnings, cal)
 	}
 }
+
+// D10: TEXT values are read with their RFC 5545 escapes resolved.
+func TestDecodeVEvent_UnescapesText(t *testing.T) {
+	cal := d5Calendar(t, `UID:text-1
+SUMMARY:Plan\; review \\ sign-off
+DESCRIPTION:Line1\nLine2\, more
+LOCATION:Room 4, Floor 2
+STATUS:CONFIRMED
+DTSTART:20261202T090000Z
+DTEND:20261202T100000Z`)
+	events := d5Decode(t, cal)
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want one", events)
+	}
+	e := events[0]
+	if want := "Line1\nLine2, more"; e.Description != want {
+		t.Errorf("Description = %q, want %q", e.Description, want)
+	}
+	if want := `Plan; review \ sign-off`; e.Summary != want {
+		t.Errorf("Summary = %q, want %q", e.Summary, want)
+	}
+	// A bare comma is a spec violation some producers commit; it must not
+	// cut the value short.
+	if want := "Room 4, Floor 2"; e.Location != want {
+		t.Errorf("Location = %q, want %q", e.Location, want)
+	}
+	if e.Status != "CONFIRMED" {
+		t.Errorf("Status = %q, want CONFIRMED", e.Status)
+	}
+}
+
+// D10: an invalid escape is a decode error naming the property, so the
+// object is skipped and reported rather than shown with a raw value.
+func TestDecodeEvents_MalformedTextIsError(t *testing.T) {
+	cal := d5Calendar(t, `UID:text-1
+DESCRIPTION:bad \x escape
+DTSTART:20261202T090000Z
+DTEND:20261202T100000Z`)
+	if _, err := decodeEvents(cal, "", "/cal/", time.Time{}, time.Time{}); err == nil || !strings.Contains(err.Error(), "DESCRIPTION") {
+		t.Fatalf("err = %v, want a DESCRIPTION decode error", err)
+	}
+}
+
+// d10Text holds every character TEXT escaping touches.
+const d10Text = "Line1\nLine2, more; and a \\ backslash"
+
+// D10: encode, serialize, parse and decode returns the original strings.
+func TestEncodeDecode_TextRoundTrip(t *testing.T) {
+	cal, _, err := encodeEvent(calendar.Event{
+		Summary:     d10Text,
+		Description: d10Text,
+		Location:    d10Text,
+		StartUTC:    harnessTime("2026-12-02T09:00:00Z"),
+		EndUTC:      harnessTime("2026-12-02T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("encodeEvent: %v", err)
+	}
+	var buf strings.Builder
+	if err := ical.NewEncoder(&buf).Encode(cal); err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	parsed, err := ical.NewDecoder(strings.NewReader(buf.String())).Decode()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	events, err := decodeEvents(parsed, "", "/cal/", time.Time{}, time.Time{})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("decodeEvents = %+v, %v; want one event", events, err)
+	}
+	e := events[0]
+	if e.Summary != d10Text || e.Description != d10Text || e.Location != d10Text {
+		t.Errorf("round trip = %q / %q / %q, want %q for each", e.Summary, e.Description, e.Location, d10Text)
+	}
+}
+
+// D10, through the CalDAV harness: a seeded escaped DESCRIPTION is listed
+// unescaped, and a created then patched event reads back unchanged.
+func TestCalDAV_TextEscapesRoundTrip(t *testing.T) {
+	h := newCalDAVHarness(t)
+	cal := h.addCalendar("personal", "Personal")
+	d5Seed(h, cal+"seeded.ics", `UID:seeded-1
+SUMMARY:Seeded
+DESCRIPTION:Line1\nLine2\, more
+DTSTART:20261202T090000Z
+DTEND:20261202T100000Z`)
+	d := h.driver()
+	ctx := context.Background()
+
+	list, err := d.ListEvents(ctx, calendar.EventQuery{
+		CalendarID: cal,
+		Start:      harnessTime("2026-12-01T00:00:00Z"),
+		End:        harnessTime("2026-12-31T00:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(list.Events) != 1 || list.Events[0].Description != "Line1\nLine2, more" {
+		t.Fatalf("ListEvents = %+v, want seeded-1 with an unescaped description", list.Events)
+	}
+
+	created, err := d.CreateEvent(ctx, cal, calendar.Event{
+		Summary:     d10Text,
+		Description: d10Text,
+		StartUTC:    harnessTime("2026-12-03T09:00:00Z"),
+		EndUTC:      harnessTime("2026-12-03T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	got, err := d.GetEvent(ctx, cal, created.UID)
+	if err != nil {
+		t.Fatalf("GetEvent after create: %v", err)
+	}
+	if got.Summary != d10Text || got.Description != d10Text {
+		t.Errorf("after create = %q / %q, want %q", got.Summary, got.Description, d10Text)
+	}
+
+	patched := "Patched\n" + d10Text
+	updated, err := d.UpdateEvent(ctx, calendar.EventPatch{CalendarID: cal, UID: created.UID, Description: &patched})
+	if err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	if updated.Description != patched {
+		t.Errorf("UpdateEvent result Description = %q, want %q", updated.Description, patched)
+	}
+	got, err = d.GetEvent(ctx, cal, created.UID)
+	if err != nil {
+		t.Fatalf("GetEvent after patch: %v", err)
+	}
+	if got.Description != patched || got.Summary != d10Text {
+		t.Errorf("after patch = %q / %q, want %q / %q", got.Summary, got.Description, d10Text, patched)
+	}
+}
+
+// D10, through the CalDAV harness: an object with a malformed TEXT escape
+// is skipped and named in Warnings; the good object beside it is listed.
+func TestListEvents_MalformedTextIsWarning(t *testing.T) {
+	h := newCalDAVHarness(t)
+	cal := h.addCalendar("personal", "Personal")
+	d5Seed(h, cal+"good.ics", `UID:good-1
+SUMMARY:Good
+DTSTART:20261202T090000Z
+DTEND:20261202T100000Z`)
+	d5Seed(h, cal+"bad.ics", `UID:bad-1
+SUMMARY:Bad
+DESCRIPTION:trailing antislash \
+DTSTART:20261203T090000Z
+DTEND:20261203T100000Z`)
+
+	list, err := h.driver().ListEvents(context.Background(), calendar.EventQuery{
+		CalendarID: cal,
+		Start:      harnessTime("2026-12-01T00:00:00Z"),
+		End:        harnessTime("2026-12-31T00:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(list.Events) != 1 || list.Events[0].UID != "good-1" {
+		t.Errorf("events = %+v, want only good-1", list.Events)
+	}
+	if len(list.Warnings) != 1 || !strings.Contains(list.Warnings[0], cal+"bad.ics") || !strings.Contains(list.Warnings[0], "DESCRIPTION") {
+		t.Errorf("warnings = %q, want one naming %sbad.ics and DESCRIPTION", list.Warnings, cal)
+	}
+}
