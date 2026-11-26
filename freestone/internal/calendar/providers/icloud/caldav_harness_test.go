@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +59,18 @@ type calDAVHarness struct {
 	objects   map[string]harnessObject   // by href, any name
 	requests  []harnessRequest
 	etagSeq   int
+
+	// icloudPartialRetrieval makes REPORT answers to a partial-retrieval
+	// request behave as live iCloud does rather than as RFC 4791 says; see
+	// serveICloudPartialRetrieval. Set it before the first request.
+	icloudPartialRetrieval bool
+}
+
+// withICloudPartialRetrieval switches the harness to iCloud's answer for a
+// calendar-data request with nested allprop and returns it.
+func (h *calDAVHarness) withICloudPartialRetrieval() *calDAVHarness {
+	h.icloudPartialRetrieval = true
+	return h
 }
 
 // newCalDAVHarness starts a server with an empty home set; it is closed
@@ -191,7 +204,12 @@ func (h *calDAVHarness) recordAndGuard(next http.Handler) http.Handler {
 				return
 			}
 			if comp := report.Prop.CalendarData.Comp; comp != nil {
-				r = r.WithContext(context.WithValue(r.Context(), harnessCompRequestKey{}, comp.request()))
+				req := comp.request()
+				if h.icloudPartialRetrieval && hasNestedAllProp(req) {
+					serveICloudPartialRetrieval(next, w, r)
+					return
+				}
+				r = r.WithContext(context.WithValue(r.Context(), harnessCompRequestKey{}, req))
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -263,6 +281,95 @@ func harnessView(ctx context.Context, cal *ical.Calendar) *ical.Calendar {
 		return cal
 	}
 	return &ical.Calendar{Component: harnessPrune(cal.Component, req)}
+}
+
+// serveICloudPartialRetrieval answers a REPORT the way live iCloud answers
+// a calendar-data request of VCALENDAR(allprop) > VEVENT(allprop): every
+// VEVENT comes back with none of its own properties (no UID, DTSTART,
+// SUMMARY) while its sub-components such as VALARM are kept. Observed
+// against the real iCloud CalDAV server on 2026-11-26; RFC 4791 §9.6 would
+// return the properties. Nothing was observed about other components, so
+// they are left whole.
+//
+// The stripping is done on the wire because go-webdav's handler encodes
+// with go-ical, which refuses a VEVENT without UID and DTSTAMP; the client's
+// decoder does not check, which is how the stripped VEVENT reached the
+// driver live.
+func serveICloudPartialRetrieval(next http.Handler, w http.ResponseWriter, r *http.Request) {
+	rec := httptest.NewRecorder()
+	next.ServeHTTP(rec, r) // no component request in ctx: the whole object
+	body, err := stripVEventPropsInMultistatus(rec.Body.Bytes())
+	if err != nil {
+		http.Error(w, "harness: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for k, v := range rec.Header() {
+		if k != "Content-Length" {
+			w.Header()[k] = v
+		}
+	}
+	w.WriteHeader(rec.Code)
+	w.Write(body)
+}
+
+var harnessCalendarDataXML = regexp.MustCompile(`(?s)(<[^>/]*calendar-data[^>]*>)(.*?)(</[^>]*calendar-data>)`)
+
+// stripVEventPropsInMultistatus rewrites every calendar-data element of a
+// multistatus body, dropping the property lines of each VEVENT.
+func stripVEventPropsInMultistatus(body []byte) ([]byte, error) {
+	var failed error
+	out := harnessCalendarDataXML.ReplaceAllFunc(body, func(m []byte) []byte {
+		parts := harnessCalendarDataXML.FindSubmatch(m)
+		var text struct {
+			Data string `xml:",chardata"`
+		}
+		if err := xml.Unmarshal(append(append([]byte("<x>"), parts[2]...), "</x>"...), &text); err != nil {
+			failed = fmt.Errorf("decode calendar-data: %w", err)
+			return m
+		}
+		var buf bytes.Buffer
+		buf.Write(parts[1])
+		if err := xml.EscapeText(&buf, []byte(stripVEventProps(text.Data))); err != nil {
+			failed = err
+			return m
+		}
+		buf.Write(parts[3])
+		return buf.Bytes()
+	})
+	return out, failed
+}
+
+// stripVEventProps drops every content line that belongs to a VEVENT
+// itself (folded continuations included), keeping its BEGIN/END and the
+// whole of any component nested in it.
+func stripVEventProps(ics string) string {
+	var kept []string
+	depth := 0 // 1 directly inside a VEVENT, >1 inside a component nested in it
+	for _, line := range strings.Split(ics, "\r\n") {
+		switch {
+		case depth == 0 && line == "BEGIN:VEVENT":
+			depth = 1
+		case depth > 0 && strings.HasPrefix(line, "BEGIN:"):
+			depth++
+		case depth > 0 && strings.HasPrefix(line, "END:"):
+			depth--
+		case depth == 1:
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\r\n")
+}
+
+// hasNestedAllProp reports whether any component request below the root
+// carries allprop, e.g. VCALENDAR(allprop) > VEVENT(allprop).
+func hasNestedAllProp(req *caldav.CalendarCompRequest) bool {
+	for i := range req.Comps {
+		if req.Comps[i].AllProps || hasNestedAllProp(&req.Comps[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 func harnessPrune(c *ical.Component, req *caldav.CalendarCompRequest) *ical.Component {

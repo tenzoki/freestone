@@ -165,6 +165,11 @@ func (s *overrideSet) unmatched() []calendar.Event {
 	return out
 }
 
+// decodeVEvent converts one VEVENT. A VEVENT without UID or DTSTART is an
+// error rather than a zero-value event: it is not an event a caller can
+// address or place in time, and a server that strips properties from its
+// answer (iCloud does, for some partial-retrieval requests) must surface as
+// a decode error, not as an empty entry.
 func decodeVEvent(vevent *ical.Component, etag, calendarID string, floating *time.Location) (calendar.Event, error) {
 	e := calendar.Event{
 		Provider:   "icloud",
@@ -172,8 +177,13 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string, floating *tim
 		ETag:       etag,
 	}
 
-	if p := vevent.Props.Get(ical.PropUID); p != nil {
-		e.UID = p.Value
+	uid := vevent.Props.Get(ical.PropUID)
+	if uid == nil || uid.Value == "" {
+		return e, fmt.Errorf("VEVENT has no UID")
+	}
+	e.UID = uid.Value
+	if vevent.Props.Get(ical.PropDateTimeStart) == nil {
+		return e, fmt.Errorf("VEVENT %q has no DTSTART", e.UID)
 	}
 	for _, f := range []struct {
 		name string
@@ -202,18 +212,16 @@ func decodeVEvent(vevent *ical.Component, etag, calendarID string, floating *tim
 		e.Attendees = append(e.Attendees, bareAddress(p.Value))
 	}
 
-	// Parse DTSTART
-	if p := vevent.Props.Get(ical.PropDateTimeStart); p != nil {
-		start, tzid, allDay, err := parseDateTime(p, floating)
-		if err != nil {
-			return e, fmt.Errorf("parse DTSTART %q: %w", p.Value, err)
-		}
-		e.StartUTC = start.UTC()
-		e.TZID = tzid
-		e.AllDay = allDay
-		if tzid != "" {
-			e.StartLocal = start.Format(time.RFC3339)
-		}
+	dtstart := vevent.Props.Get(ical.PropDateTimeStart)
+	start, tzid, allDay, err := parseDateTime(dtstart, floating)
+	if err != nil {
+		return e, fmt.Errorf("parse DTSTART %q: %w", dtstart.Value, err)
+	}
+	e.StartUTC = start.UTC()
+	e.TZID = tzid
+	e.AllDay = allDay
+	if tzid != "" {
+		e.StartLocal = start.Format(time.RFC3339)
 	}
 
 	// Parse DTEND

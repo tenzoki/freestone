@@ -85,17 +85,10 @@ func (d *Driver) ListEvents(ctx context.Context, q calendar.EventQuery) (calenda
 		calPath = d.homeSet
 	}
 
+	// No CompRequest: a bare calendar-data returns each object whole. iCloud
+	// answers a partial-retrieval request (comp + allprop) with VEVENTs
+	// stripped of every property.
 	query := &caldav.CalendarQuery{
-		CompRequest: caldav.CalendarCompRequest{
-			Name:     "VCALENDAR",
-			AllProps: true,
-			Comps: []caldav.CalendarCompRequest{
-				{
-					Name:     "VEVENT",
-					AllProps: true,
-				},
-			},
-		},
 		CompFilter: caldav.CompFilter{
 			Name: "VCALENDAR",
 			Comps: []caldav.CompFilter{
