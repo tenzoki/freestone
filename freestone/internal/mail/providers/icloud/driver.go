@@ -5,6 +5,7 @@ package icloud
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -24,6 +25,9 @@ type Driver struct {
 	username      string
 	password      string
 	draftsMailbox string
+	// dial opens the connection to the IMAP server. New installs a TLS dial
+	// to addr; tests inject a plain TCP dial to an in-process server.
+	dial func(ctx context.Context) (net.Conn, error)
 }
 
 // New creates a new iCloud mail driver.
@@ -31,19 +35,22 @@ func New(host string, port int, username, password, draftsMailbox string) *Drive
 	if draftsMailbox == "" {
 		draftsMailbox = "Drafts"
 	}
+	addr := fmt.Sprintf("%s:%d", host, port)
 	return &Driver{
-		addr:          fmt.Sprintf("%s:%d", host, port),
+		addr:          addr,
 		username:      username,
 		password:      password,
 		draftsMailbox: draftsMailbox,
+		dial: func(ctx context.Context) (net.Conn, error) {
+			return dialTLS(ctx, addr)
+		},
 	}
 }
 
 func (d *Driver) Name() string { return "icloud" }
 
-// connect opens a TLS connection with a timeout derived from ctx, logs in,
-// and returns the client. The caller must call Logout when done.
-func (d *Driver) connect(ctx context.Context) (*imapclient.Client, error) {
+// dialTLS opens a TLS connection to addr with a timeout derived from ctx.
+func dialTLS(ctx context.Context, addr string) (net.Conn, error) {
 	// Derive deadline from context, fall back to imapDialTimeout.
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -56,7 +63,13 @@ func (d *Driver) connect(ctx context.Context) (*imapclient.Client, error) {
 			Deadline: deadline,
 		},
 	}
-	conn, err := dialer.DialContext(ctx, "tcp", d.addr)
+	return dialer.DialContext(ctx, "tcp", addr)
+}
+
+// connect dials the server, logs in, and returns the client. The caller
+// must call Logout when done.
+func (d *Driver) connect(ctx context.Context) (*imapclient.Client, error) {
+	conn, err := d.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("icloud-mail: dial %s: %w", d.addr, err)
 	}
@@ -70,12 +83,22 @@ func (d *Driver) connect(ctx context.Context) (*imapclient.Client, error) {
 	return c, nil
 }
 
-func (d *Driver) ListMailboxes(ctx context.Context) ([]mail.Mailbox, error) {
+// logout ends the session and joins a LOGOUT failure into *errp, so it is
+// reported rather than dropped. It must run at function exit: calling
+// c.Logout() directly in a defer statement would send LOGOUT before the
+// method's own commands.
+func logout(c *imapclient.Client, errp *error) {
+	if err := c.Logout().Wait(); err != nil {
+		*errp = errors.Join(*errp, fmt.Errorf("icloud-mail: logout: %w", err))
+	}
+}
+
+func (d *Driver) ListMailboxes(ctx context.Context) (_ []mail.Mailbox, err error) {
 	c, err := d.connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Logout().Wait()
+	defer func() { logout(c, &err) }()
 
 	listCmd := c.List("", "*", &imap.ListOptions{
 		ReturnStatus: &imap.StatusOptions{
@@ -118,12 +141,12 @@ func (d *Driver) ListMailboxes(ctx context.Context) ([]mail.Mailbox, error) {
 	return result, nil
 }
 
-func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.MessageSummary, error) {
+func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) (_ []mail.MessageSummary, err error) {
 	c, err := d.connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Logout().Wait()
+	defer func() { logout(c, &err) }()
 
 	mboxID := q.MailboxID
 	if mboxID == "" {
@@ -223,12 +246,12 @@ func (d *Driver) ListMessages(ctx context.Context, q mail.MessageQuery) ([]mail.
 	return result, nil
 }
 
-func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Message, error) {
+func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (_ *mail.Message, err error) {
 	c, err := d.connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Logout().Wait()
+	defer func() { logout(c, &err) }()
 
 	if mailboxID == "" {
 		mailboxID = "INBOX"
@@ -302,12 +325,12 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Me
 	return msg, fetchCmd.Close()
 }
 
-func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (string, error) {
+func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (_ string, err error) {
 	c, err := d.connect(ctx)
 	if err != nil {
 		return "", err
 	}
-	defer c.Logout().Wait()
+	defer func() { logout(c, &err) }()
 
 	// If replying, fetch the original message's Message-ID for threading.
 	var inReplyToMsgID string
@@ -365,12 +388,12 @@ func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (str
 	return "", nil
 }
 
-func (d *Driver) MarkRead(ctx context.Context, mailboxID, id string) error {
+func (d *Driver) MarkRead(ctx context.Context, mailboxID, id string) (err error) {
 	c, err := d.connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer c.Logout().Wait()
+	defer func() { logout(c, &err) }()
 
 	if mailboxID == "" {
 		mailboxID = "INBOX"
