@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/emersion/go-ical"
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 
@@ -154,19 +156,73 @@ func (d *Driver) GetEvent(ctx context.Context, calendarID, uid string) (*calenda
 	return &events[0], nil
 }
 
-// loadObject fetches the whole calendar object that holds the event uid.
-// It is the one place Get, Update and Delete find an event's object, and it
-// must always return the full object: Update edits it in place and writes
-// it back, so anything a partial fetch left out would be deleted.
+// loadObject finds the whole calendar object that holds the event uid. It
+// is the one place Get, Update and Delete find an event's object.
+//
+// The object is looked up by UID, not at <calendar>/<uid>.ics: RFC 4791
+// lets every client choose its own href, so an event another client wrote
+// can live anywhere in the collection.
+//
+// It must always return the full object: Update edits it in place and
+// writes it back, so anything a partial fetch left out would be deleted.
+// Hence no CompRequest, so the server returns each object whole; iCloud
+// answers a partial-retrieval request with VEVENTs stripped of every
+// property.
 func (d *Driver) loadObject(ctx context.Context, calendarID, uid string) (*caldav.CalendarObject, error) {
-	obj, err := d.client.GetCalendarObject(ctx, eventObjectPath(calendarID, uid))
+	query := &caldav.CalendarQuery{
+		CompFilter: caldav.CompFilter{
+			Name: "VCALENDAR",
+			Comps: []caldav.CompFilter{{
+				Name: "VEVENT",
+				Props: []caldav.PropFilter{{
+					Name:      "UID",
+					TextMatch: &caldav.TextMatch{Text: uid},
+				}},
+			}},
+		},
+	}
+	objects, err := d.client.QueryCalendar(ctx, calendarID, query)
 	if err != nil {
-		return nil, fmt.Errorf("icloud-calendar: get event %s: %w", uid, err)
+		return nil, fmt.Errorf("icloud-calendar: find event %s: %w", uid, err)
 	}
-	if obj.Data == nil {
-		return nil, fmt.Errorf("icloud-calendar: event %s has no data", uid)
+
+	// text-match is a substring test on the server, so uid-10 answers a
+	// query for uid-1; keep only exact UIDs.
+	var matches []caldav.CalendarObject
+	for _, obj := range objects {
+		if obj.Data == nil {
+			return nil, fmt.Errorf("icloud-calendar: event %s: object %s has no data", uid, obj.Path)
+		}
+		if holdsUID(obj.Data, uid) {
+			matches = append(matches, obj)
+		}
 	}
-	return obj, nil
+
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("icloud-calendar: event %s not found in %s", uid, calendarID)
+	case 1:
+		return &matches[0], nil
+	default:
+		hrefs := make([]string, len(matches))
+		for i, m := range matches {
+			hrefs[i] = m.Path
+		}
+		return nil, fmt.Errorf("icloud-calendar: event %s is held by %d objects (%s); refusing to pick one", uid, len(matches), strings.Join(hrefs, ", "))
+	}
+}
+
+// holdsUID reports whether any VEVENT in cal carries exactly uid.
+func holdsUID(cal *ical.Calendar, uid string) bool {
+	for _, c := range cal.Children {
+		if c.Name != ical.CompEvent {
+			continue
+		}
+		if p := c.Props.Get(ical.PropUID); p != nil && p.Value == uid {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Driver) CreateEvent(ctx context.Context, calendarID string, e calendar.Event) (*calendar.Event, error) {
