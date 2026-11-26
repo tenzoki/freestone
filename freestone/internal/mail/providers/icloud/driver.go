@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	netmail "net/mail"
 	"strconv"
 	"time"
 
@@ -27,6 +28,9 @@ type Driver struct {
 	username      string
 	password      string
 	draftsMailbox string
+	// fromAddress is the configured sender for drafts; empty falls back to
+	// username (see draftFrom).
+	fromAddress string
 	// dial opens the connection to the IMAP server. New installs a TLS dial
 	// to addr; tests inject a plain TCP dial to an in-process server.
 	dial func(ctx context.Context) (net.Conn, error)
@@ -36,7 +40,8 @@ type Driver struct {
 }
 
 // New creates a new iCloud mail driver.
-func New(host string, port int, username, password, draftsMailbox string, log *slog.Logger) *Driver {
+// fromAddress is the sender written into drafts; empty uses username.
+func New(host string, port int, username, password, draftsMailbox, fromAddress string, log *slog.Logger) *Driver {
 	if draftsMailbox == "" {
 		draftsMailbox = "Drafts"
 	}
@@ -46,6 +51,7 @@ func New(host string, port int, username, password, draftsMailbox string, log *s
 		username:      username,
 		password:      password,
 		draftsMailbox: draftsMailbox,
+		fromAddress:   fromAddress,
 		log:           log,
 		dial: func(ctx context.Context) (net.Conn, error) {
 			return dialTLS(ctx, addr)
@@ -317,7 +323,9 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Me
 
 		msgData := fetchCmd.Next()
 		if msgData == nil {
-			fetchCmd.Close()
+			if err := fetchCmd.Close(); err != nil {
+				return fmt.Errorf("icloud-mail: fetch %s: %w", id, err)
+			}
 			return fmt.Errorf("icloud-mail: message %s not found", id)
 		}
 
@@ -390,46 +398,39 @@ func (d *Driver) GetMessage(ctx context.Context, mailboxID, id string) (*mail.Me
 }
 
 func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (string, error) {
+	from, err := d.draftFrom()
+	if err != nil {
+		return "", err
+	}
+
 	var draftID string
-	err := d.session(ctx, "save draft reply", func(c *imapclient.Client) error {
-		// If replying, fetch the original message's Message-ID for threading.
-		var inReplyToMsgID string
+	err = d.session(ctx, "save draft reply", func(c *imapclient.Client) error {
+		composed := rfc5322.Draft{
+			From:    from,
+			To:      draft.To,
+			Cc:      draft.Cc,
+			Bcc:     draft.Bcc,
+			Subject: draft.Subject,
+			Text:    draft.BodyText,
+			HTML:    draft.BodyHTML,
+		}
 		if draft.InReplyToID != "" {
-			mailboxID := draft.InReplyToMailboxID
-			if mailboxID == "" {
-				mailboxID = "INBOX"
+			parentID, parentRefs, err := d.replyParent(c, draft.InReplyToMailboxID, draft.InReplyToID)
+			if err != nil {
+				return err
 			}
-			if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
-				return fmt.Errorf("icloud-mail: select %s for reply: %w", mailboxID, err)
-			}
-			origUID, parseErr := strconv.ParseUint(draft.InReplyToID, 10, 32)
-			if parseErr == nil {
-				uidSet := imap.UIDSetNum(imap.UID(origUID))
-				fetchOpts := &imap.FetchOptions{Envelope: true}
-				fetchCmd := c.Fetch(uidSet, fetchOpts)
-				if msgData := fetchCmd.Next(); msgData != nil {
-					for {
-						item := msgData.Next()
-						if item == nil {
-							break
-						}
-						if envData, ok := item.(imapclient.FetchItemDataEnvelope); ok {
-							if envData.Envelope != nil {
-								inReplyToMsgID = envData.Envelope.MessageID
-							}
-						}
-					}
-				}
-				fetchCmd.Close()
-			}
+			composed.ParentMessageID = parentID
+			composed.ParentReferences = parentRefs
 		}
 
-		body, err := encodeDraftReply(draft, inReplyToMsgID)
+		body, err := rfc5322.ComposeDraft(composed)
 		if err != nil {
-			return fmt.Errorf("icloud-mail: encode draft: %w", err)
+			return fmt.Errorf("icloud-mail: compose draft: %w", err)
 		}
 
-		appendCmd := c.Append(d.draftsMailbox, int64(len(body)), nil)
+		// \Draft marks the message as a draft for every client reading the
+		// mailbox; without it Mail.app shows it as a received message.
+		appendCmd := c.Append(d.draftsMailbox, int64(len(body)), &imap.AppendOptions{Flags: []imap.Flag{imap.FlagDraft}})
 		if _, err := appendCmd.Write(body); err != nil {
 			return fmt.Errorf("icloud-mail: append write: %w", err)
 		}
@@ -451,6 +452,63 @@ func (d *Driver) SaveDraftReply(ctx context.Context, draft mail.DraftReply) (str
 		return "", err
 	}
 	return draftID, nil
+}
+
+// draftFrom is the From address of a draft: from_address when configured,
+// else the login name when it is an address. iCloud logins can be an Apple
+// ID that is not a mail address, and a draft without a sender is not one a
+// client can send.
+func (d *Driver) draftFrom() (string, error) {
+	if d.fromAddress != "" {
+		return d.fromAddress, nil
+	}
+	if _, err := netmail.ParseAddress(d.username); err != nil {
+		return "", fmt.Errorf("icloud-mail: no sender for drafts: set mail.icloud.from_address (username %q is not a mail address: %v)", d.username, err)
+	}
+	return d.username, nil
+}
+
+// replyParent returns the Message-ID and References chain of the message
+// being replied to. A reply whose parent cannot be read is an error: saving
+// it unthreaded would look like success and break the conversation.
+func (d *Driver) replyParent(c *imapclient.Client, mailboxID, id string) (string, []string, error) {
+	if mailboxID == "" {
+		mailboxID = "INBOX"
+	}
+	uid, err := strconv.ParseUint(id, 10, 32)
+	if err != nil {
+		return "", nil, fmt.Errorf("icloud-mail: invalid reply message ID %q: %w", id, err)
+	}
+	if _, err := c.Select(mailboxID, nil).Wait(); err != nil {
+		return "", nil, fmt.Errorf("icloud-mail: select %s for reply: %w", mailboxID, err)
+	}
+
+	// Peek: looking up the parent must not mark it read.
+	refsSection := &imap.FetchItemBodySection{
+		Specifier:    imap.PartSpecifierHeader,
+		HeaderFields: []string{"References"},
+		Peek:         true,
+	}
+	bufs, err := c.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
+		UID:         true,
+		Envelope:    true,
+		BodySection: []*imap.FetchItemBodySection{refsSection},
+	}).Collect()
+	if err != nil {
+		return "", nil, fmt.Errorf("icloud-mail: fetch reply parent %s: %w", id, err)
+	}
+	if len(bufs) == 0 {
+		return "", nil, fmt.Errorf("icloud-mail: reply parent %s not found in %s", id, mailboxID)
+	}
+	parent := bufs[0]
+	if parent.Envelope == nil || parent.Envelope.MessageID == "" {
+		return "", nil, fmt.Errorf("icloud-mail: reply parent %s has no Message-ID to thread on", id)
+	}
+	refs, err := rfc5322.HeaderReferences(parent.FindBodySection(refsSection))
+	if err != nil {
+		return "", nil, fmt.Errorf("icloud-mail: reply parent %s: %w", id, err)
+	}
+	return parent.Envelope.MessageID, refs, nil
 }
 
 func (d *Driver) MarkRead(ctx context.Context, mailboxID, id string) error {

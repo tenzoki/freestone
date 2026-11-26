@@ -12,6 +12,7 @@ import (
 	"google.golang.org/api/option"
 
 	domain "github.com/kai/freestone/internal/mail"
+	"github.com/kai/freestone/internal/mail/rfc5322"
 )
 
 // Driver implements mail.Provider for Gmail.
@@ -119,32 +120,43 @@ func (d *Driver) GetMessage(ctx context.Context, _, id string) (*domain.Message,
 	return &msg, nil
 }
 
-// SaveDraftReply creates a Gmail draft as a reply to an existing message.
-// It fetches the original message's threadId for threading, encodes a
-// minimal RFC 5322 message, and calls Drafts.Create.
+// SaveDraftReply creates a Gmail draft, threaded on the original message
+// when it replies to one: threadId for Gmail's own conversation view, and
+// In-Reply-To and References for every other client. Gmail fills in From.
 func (d *Driver) SaveDraftReply(ctx context.Context, draft domain.DraftReply) (string, error) {
-	var threadID string
+	composed := rfc5322.Draft{
+		To:      draft.To,
+		Cc:      draft.Cc,
+		Bcc:     draft.Bcc,
+		Subject: draft.Subject,
+		Text:    draft.BodyText,
+		HTML:    draft.BodyHTML,
+	}
+	gmailMsg := &gmail.Message{}
 
-	// Fetch the original message's ThreadId for proper threading.
 	if draft.InReplyToID != "" {
 		orig, err := d.svc.Users.Messages.Get("me", draft.InReplyToID).
 			Context(ctx).
 			Format("metadata").
-			MetadataHeaders("Message-ID").
+			MetadataHeaders("Message-ID", "References").
 			Do()
 		if err != nil {
 			return "", fmt.Errorf("gmail: get original message %s: %w", draft.InReplyToID, err)
 		}
-		threadID = orig.ThreadId
+		parentID, parentRefs, err := replyThreading(orig)
+		if err != nil {
+			return "", fmt.Errorf("gmail: original message %s: %w", draft.InReplyToID, err)
+		}
+		composed.ParentMessageID = parentID
+		composed.ParentReferences = parentRefs
+		gmailMsg.ThreadId = orig.ThreadId
 	}
 
-	body := buildRFC5322(draft)
-	raw := base64.URLEncoding.EncodeToString(body)
-
-	gmailMsg := &gmail.Message{Raw: raw}
-	if threadID != "" {
-		gmailMsg.ThreadId = threadID
+	body, err := rfc5322.ComposeDraft(composed)
+	if err != nil {
+		return "", fmt.Errorf("gmail: compose draft: %w", err)
 	}
+	gmailMsg.Raw = base64.URLEncoding.EncodeToString(body)
 
 	created, err := d.svc.Users.Drafts.Create("me", &gmail.Draft{
 		Message: gmailMsg,

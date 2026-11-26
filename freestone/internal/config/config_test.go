@@ -292,3 +292,37 @@ secret_ref = "pw"
 		t.Errorf("expected empty drafts_mailbox, got %q", cfg.Mail.ICloud.DraftsMailbox)
 	}
 }
+
+func TestLoad_ICloudMailFromAddress(t *testing.T) {
+	p := writeTOML(t, `
+[mail.icloud]
+host         = "imap.mail.me.com"
+port         = 993
+username     = "apple-id"
+secret_ref   = "pw"
+from_address = "Kai <kai@example.com>"
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mail.ICloud.FromAddress != "Kai <kai@example.com>" {
+		t.Errorf("from_address = %q", cfg.Mail.ICloud.FromAddress)
+	}
+}
+
+func TestLoad_ICloudMailInvalidFromAddress(t *testing.T) {
+	for _, from := range []string{"not an address", `kai@example.com\r\nBcc: x@y.de`} {
+		p := writeTOML(t, `
+[mail.icloud]
+host         = "imap.mail.me.com"
+port         = 993
+username     = "user@icloud.com"
+secret_ref   = "pw"
+from_address = "`+from+`"
+`)
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "from_address") {
+			t.Errorf("from_address %q: Load error = %v, want one naming from_address", from, err)
+		}
+	}
+}

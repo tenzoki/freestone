@@ -2,6 +2,7 @@ package google
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/mail"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"google.golang.org/api/gmail/v1"
 
 	domain "github.com/kai/freestone/internal/mail"
+	"github.com/kai/freestone/internal/mail/rfc5322"
 )
 
 // messageToSummary converts a Gmail metadata-format message to a domain MessageSummary.
@@ -147,27 +149,33 @@ func splitAddresses(s string) []string {
 	return addrs
 }
 
-// buildRFC5322 creates a minimal RFC 5322 message from a DraftReply.
-func buildRFC5322(d domain.DraftReply) []byte {
-	var b strings.Builder
-	b.WriteString("To: " + strings.Join(d.To, ", ") + "\r\n")
-	if len(d.Cc) > 0 {
-		b.WriteString("Cc: " + strings.Join(d.Cc, ", ") + "\r\n")
+// replyThreading reads the Message-ID and References of a metadata-format
+// message. A parent without a Message-ID cannot be threaded on, which is an
+// error rather than a silently unthreaded reply.
+func replyThreading(msg *gmail.Message) (messageID string, references []string, err error) {
+	var rawID, rawRefs string
+	if msg.Payload != nil {
+		for _, h := range msg.Payload.Headers {
+			switch strings.ToLower(h.Name) {
+			case "message-id":
+				rawID = h.Value
+			case "references":
+				rawRefs = h.Value
+			}
+		}
 	}
-	if len(d.Bcc) > 0 {
-		b.WriteString("Bcc: " + strings.Join(d.Bcc, ", ") + "\r\n")
+	ids, err := rfc5322.ParseMsgIDList(rawID)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse Message-ID: %w", err)
 	}
-	b.WriteString("Subject: " + d.Subject + "\r\n")
-	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
-	b.WriteString("\r\n")
-	body := d.BodyText
-	if body == "" {
-		body = d.BodyHTML
+	if len(ids) != 1 {
+		return "", nil, fmt.Errorf("want exactly one Message-ID to thread on, found %d (%q)", len(ids), rawID)
 	}
-	b.WriteString(body)
-	return []byte(b.String())
+	references, err = rfc5322.ParseMsgIDList(rawRefs)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse References: %w", err)
+	}
+	return ids[0], references, nil
 }
 
 // parseDate attempts to parse common email date formats.

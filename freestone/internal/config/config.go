@@ -3,8 +3,10 @@ package config
 
 import (
 	"fmt"
+	"net/mail"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -49,6 +51,9 @@ type ICloudMailCfg struct {
 	Username      string `toml:"username"`
 	SecretRef     string `toml:"secret_ref"`
 	DraftsMailbox string `toml:"drafts_mailbox"`
+	// FromAddress is the sender written into saved drafts. Optional: when
+	// empty the driver uses Username, which must then be a mail address.
+	FromAddress string `toml:"from_address"`
 }
 
 // GoogleProviderCfg configures a Google API provider (calendar or mail).
@@ -150,6 +155,16 @@ func validateICloudMail(c *ICloudMailCfg) error {
 	}
 	if c.SecretRef == "" {
 		return fmt.Errorf("mail.icloud.secret_ref is required")
+	}
+	if c.FromAddress != "" {
+		// A line break would pass ParseAddress only to be rejected on every
+		// draft; checking here makes a bad config fail at startup instead.
+		if strings.ContainsAny(c.FromAddress, "\r\n") {
+			return fmt.Errorf("mail.icloud.from_address must not contain a line break")
+		}
+		if _, err := mail.ParseAddress(c.FromAddress); err != nil {
+			return fmt.Errorf("mail.icloud.from_address %q is not a mail address: %w", c.FromAddress, err)
+		}
 	}
 	return nil
 }

@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -529,5 +530,89 @@ func (d *D) MarkRead() { d.svc.Users.Messages.Modify("me", id, &gmail.ModifyMess
 			}
 			t.Fatalf("want a violation containing %q, got:\n%s", tc.want, formatViolations(got))
 		})
+	}
+}
+
+// providerImportPrefixes are the provider client libraries the shared codec
+// must not import. rfc5322 is outside the write-surface scan above (go-message
+// itself has a Header.Copy that the scan would flag), so this check is what
+// keeps mailbox operations out of it: a package that cannot reach an IMAP
+// client or the Gmail service cannot change a mailbox.
+var providerImportPrefixes = []string{
+	"github.com/emersion/go-imap",
+	"google.golang.org/api/gmail",
+}
+
+// TestRFC5322CodecImportsNoProvider scans every .go file under rfc5322/,
+// tests included, since a test helper could carry a client in as well.
+func TestRFC5322CodecImportsNoProvider(t *testing.T) {
+	fset := token.NewFileSet()
+	var scanned []string
+	var bad []string
+	err := filepath.WalkDir("rfc5322", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, p, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		scanned = append(scanned, filepath.ToSlash(p))
+		bad = append(bad, providerImports(fset, file)...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan rfc5322/: %v", err)
+	}
+	for _, want := range []string{"rfc5322/decode.go", "rfc5322/compose.go"} {
+		if !slices.Contains(scanned, want) {
+			t.Fatalf("scan did not reach %s (scanned: %v)", want, scanned)
+		}
+	}
+	if len(bad) > 0 {
+		t.Fatalf("the shared mail codec imports a provider client:\n  %s", strings.Join(bad, "\n  "))
+	}
+}
+
+func providerImports(fset *token.FileSet, file *ast.File) []string {
+	var bad []string
+	for _, imp := range file.Imports {
+		p, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue // unreachable for a file go/parser accepted
+		}
+		for _, prefix := range providerImportPrefixes {
+			if p == prefix || strings.HasPrefix(p, prefix+"/") {
+				bad = append(bad, fmt.Sprintf("%s: imports %s", fset.Position(imp.Pos()), p))
+			}
+		}
+	}
+	return bad
+}
+
+// TestRFC5322ImportCheck proves providerImports flags what it should.
+func TestRFC5322ImportCheck(t *testing.T) {
+	cases := map[string]bool{
+		`"github.com/emersion/go-message/mail"`:       false,
+		`"google.golang.org/api/option"`:              false,
+		`"github.com/emersion/go-imap/v2"`:            true,
+		`"github.com/emersion/go-imap/v2/imapclient"`: true,
+		`imap "github.com/emersion/go-imap"`:          true,
+		`"google.golang.org/api/gmail/v1"`:            true,
+		`"github.com/emersion/go-imapextra"`:          false,
+	}
+	for imp, wantBad := range cases {
+		src := "package fixture\n\nimport " + imp + "\n"
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "fixture.go", src, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", imp, err)
+		}
+		if got := len(providerImports(fset, file)) > 0; got != wantBad {
+			t.Errorf("import %s: flagged = %v, want %v", imp, got, wantBad)
+		}
 	}
 }
