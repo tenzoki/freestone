@@ -21,8 +21,10 @@ type Config struct {
 
 // ServerCfg holds server-wide settings.
 type ServerCfg struct {
-	LogFile   string `toml:"log_file"`
-	AuditFile string `toml:"audit_file"` // phase 2
+	LogFile string `toml:"log_file"`
+	// AuditFile is the append-only JSONL audit log of write tools. Optional:
+	// when empty, serve writes ~/.config/freestone/audit.jsonl.
+	AuditFile string `toml:"audit_file"`
 }
 
 // CalendarCfg groups calendar providers.
@@ -90,6 +92,12 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	// A relative path would resolve against whatever directory the MCP
+	// client starts the server in.
+	if c.Server.AuditFile != "" && !filepath.IsAbs(c.Server.AuditFile) {
+		return fmt.Errorf("server.audit_file must be an absolute path")
+	}
+
 	hasProvider := false
 
 	if ic := c.Calendar.ICloud; ic != nil {

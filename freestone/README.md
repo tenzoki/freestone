@@ -4,7 +4,7 @@ A personal MCP server that extends Claude Code with calendar, mail, and file acc
 
 ## Status
 
-**Phase 2** — Read/write with iCloud and Google providers. The audit logger exists but is not yet wired into `serve` (see Audit Log).
+**Phase 2** — Read/write with iCloud and Google providers. Write tool calls are recorded in an append-only audit log (see Audit Log).
 
 ## Install
 
@@ -122,7 +122,7 @@ The `provider` parameter selects which backend to use (`icloud` or `google`). Om
 
 **All-day events.** On create, set `all_day` and give `start` and `end` as dates (`YYYY-MM-DD`; RFC3339 is accepted too). The date written is the one on the value's own wall clock, never converted to UTC. `end` is exclusive: a one-day event on 2026-11-26 ends 2026-11-27. On update, an all-day event stays all-day on both providers: only the date of each new time's own wall clock is used, and the end must fall on a later date.
 
-**Recurring events.** Google expands series itself. On iCloud, freestone expands them in the event's own time zone, so a weekly 09:00 meeting stays at 09:00 local across a daylight-saving change and `BYDAY` matches the local date. Moved instances (`RECURRENCE-ID`) replace the instance they move, and `EXDATE` and `RDATE` are applied; at most 366 instances are expanded per series. An object freestone cannot expand is left out and named in `warnings` rather than shown wrongly.
+**Recurring events.** Google expands series itself. On iCloud, freestone expands them in the event's own time zone, so a weekly 09:00 meeting stays at 09:00 local across a daylight-saving change and `BYDAY` matches the local date. A local time that a daylight-saving change repeats (02:30 on the fall-back day in Europe/Berlin) is read as its first occurrence, and one it skips (02:30 on the spring-forward day) with the offset before the gap, so it lands that far after the gap (03:30), as RFC 5545 §3.3.5 reads both; this holds for every start, end, `RDATE`, `EXDATE`, `RECURRENCE-ID`, local `UNTIL` and expanded occurrence. Moved instances (`RECURRENCE-ID`) replace the instance they move, and `EXDATE` and `RDATE` are applied; at most 366 instances are expanded per series. An object freestone cannot expand is left out and named in `warnings` rather than shown wrongly.
 
 Update and delete address occurrences differently on the two providers:
 
@@ -176,9 +176,11 @@ A reply carries `In-Reply-To` and `References` (the parent's `References` plus i
 
 ## Audit Log
 
-The write tools (calendar create/update/delete, mail draft save, mail mark read, file write, mkdir) call an append-only JSONL audit logger (`internal/audit`) that records the tool name, provider, input parameters, outcome (ok/error) and timestamp. **`freestone-mcp serve` does not create that logger yet**: `server.audit_file` in the config is read but unused, so no audit log is written today.
+Every call of a write tool (calendar create/update/delete, mail draft save, mail mark read, file write, mkdir) that reaches its provider is appended as one JSON line to the audit log, recording the tool name, provider, input parameters, outcome (ok/error, with the error text) and timestamp. A call refused before it reaches the provider (unknown provider, invalid input) writes nothing and is not logged.
 
-When wired, the audit log is best-effort: write failures do not block tool execution.
+The log is `server.audit_file` in the config, which must be an absolute path. When it is empty, the log is `~/.config/freestone/audit.jsonl`, and its directory is created if missing. The file is created with mode 0600 and only ever appended to. `freestone-mcp serve` opens it at startup and exits with an error if it cannot; it closes it on shutdown.
+
+Once open, the log is best-effort: a failed audit write does not fail the tool call, whose write has already happened, and is reported as an error in the server log.
 
 ## File Access Rules
 

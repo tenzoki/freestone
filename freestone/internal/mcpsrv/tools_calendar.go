@@ -178,7 +178,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				AllDay:      input.AllDay,
 			}
 			created, err := p.CreateEvent(ctx, input.CalendarID, e)
-			auditLog(al, "calendar_create_event", input.Provider, map[string]string{
+			auditLog(al, log, "calendar_create_event", input.Provider, map[string]string{
 				"calendar_id": input.CalendarID,
 				"summary":     input.Summary,
 			}, err)
@@ -206,7 +206,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			updated, err := p.UpdateEvent(ctx, patch)
-			auditLog(al, "calendar_update_event", input.Provider, withGiven(map[string]string{
+			auditLog(al, log, "calendar_update_event", input.Provider, withGiven(map[string]string{
 				"calendar_id": input.CalendarID,
 				"uid":         input.UID,
 			}, "scope", input.Scope), err)
@@ -234,7 +234,7 @@ func registerCalendarTools(srv *mcp.Server, reg *calendar.Registry, al *audit.Lo
 				return errResult(err), nil, nil
 			}
 			err = p.DeleteEvent(ctx, del)
-			auditLog(al, "calendar_delete_event", input.Provider, withGiven(map[string]string{
+			auditLog(al, log, "calendar_delete_event", input.Provider, withGiven(map[string]string{
 				"calendar_id": input.CalendarID,
 				"uid":         input.UID,
 			}, "scope", input.Scope, "recurrence_id", input.RecurrenceID), err)

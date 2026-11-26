@@ -98,14 +98,16 @@ func eventFromGoogle(item *calendar.Event) (domain.Event, error) {
 	if item.OriginalStartTime != nil {
 		if item.OriginalStartTime.DateTime != "" {
 			t, err := time.Parse(time.RFC3339, item.OriginalStartTime.DateTime)
-			if err == nil {
-				ev.InstanceStartUTC = t.UTC()
+			if err != nil {
+				return domain.Event{}, fmt.Errorf("google calendar: event %s: parse originalStartTime %q: %w", item.Id, item.OriginalStartTime.DateTime, err)
 			}
+			ev.InstanceStartUTC = t.UTC()
 		} else if item.OriginalStartTime.Date != "" {
 			t, err := time.Parse("2006-01-02", item.OriginalStartTime.Date)
-			if err == nil {
-				ev.InstanceStartUTC = t
+			if err != nil {
+				return domain.Event{}, fmt.Errorf("google calendar: event %s: parse originalStartTime date %q: %w", item.Id, item.OriginalStartTime.Date, err)
 			}
+			ev.InstanceStartUTC = t
 		}
 	}
 

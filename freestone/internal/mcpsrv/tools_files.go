@@ -128,7 +128,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			err := fs.WriteFile(ctx, input.Path, []byte(input.Content), input.Overwrite)
-			auditLog(al, "files_write_file", "", map[string]string{
+			auditLog(al, log, "files_write_file", "", map[string]string{
 				"path":      input.Path,
 				"overwrite": fmt.Sprintf("%v", input.Overwrite),
 				"size":      fmt.Sprintf("%d", len(input.Content)),
@@ -149,7 +149,7 @@ func registerFileTools(srv *mcp.Server, fs files.FileService, al *audit.Logger, 
 			ctx, cancel := withTimeout(ctx)
 			defer cancel()
 			err := fs.MakeDir(ctx, input.Path)
-			auditLog(al, "files_make_dir", "", map[string]string{
+			auditLog(al, log, "files_make_dir", "", map[string]string{
 				"path": input.Path,
 			}, err)
 			if err != nil {

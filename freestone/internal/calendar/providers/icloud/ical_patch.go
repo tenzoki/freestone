@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
-	"github.com/teambition/rrule-go"
 
 	"github.com/kai/freestone/internal/calendar"
 )
@@ -40,7 +39,7 @@ func applyPatch(cal *ical.Calendar, p calendar.EventPatch, now time.Time, floati
 	// can be checked against them.
 	var shift wallShift
 	var seriesLoc *time.Location
-	var before *rrule.Set
+	var before *occurrenceSet
 	if s.recurring() && p.Start != nil {
 		var oldStart time.Time
 		before, oldStart, err = generatedSet(master, floating)

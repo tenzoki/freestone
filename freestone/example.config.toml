@@ -7,8 +7,10 @@
 [server]
 # Path to the JSON log file. Leave empty for stderr-only logging.
 log_file = ""
-# audit_file is accepted but not used yet: serve writes no audit log.
-# audit_file = "/path/to/audit.jsonl"
+# Append-only JSONL audit log of every write tool call. Must be an absolute
+# path. Leave empty (or unset) for ~/.config/freestone/audit.jsonl. serve
+# refuses to start if the file cannot be opened.
+audit_file = ""
 
 # ---------------------------------------------------------------------------
 # Calendar providers

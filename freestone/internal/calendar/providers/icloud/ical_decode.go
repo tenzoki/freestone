@@ -257,9 +257,15 @@ type eventSpan struct {
 	exact time.Duration
 }
 
-// endOf is the end of the instance that starts at start.
+// endOf is the end of the instance that starts at start. Nominal days move
+// start's wall clock, and the reading they reach is resolved as any local
+// reading is (localInstant); without them start is kept as the instant it
+// is, which a reading of it would not be in a repeated hour.
 func (s eventSpan) endOf(start time.Time) time.Time {
-	return start.AddDate(0, 0, s.days).Add(s.exact)
+	if s.days == 0 {
+		return start.Add(s.exact)
+	}
+	return localInstant(wallClock(start).AddDate(0, 0, s.days), start.Location()).Add(s.exact)
 }
 
 // decodeSpan reads a VEVENT's span from DTEND or DURATION. RFC 5545 makes
@@ -411,21 +417,39 @@ func parseDateTimeValues(p *ical.Prop, floating *time.Location) ([]time.Time, er
 // parseDateTimeValue parses one DATE or DATE-TIME value under its
 // property's parameters (VALUE, TZID). A zoned value is read in its TZID's
 // location, and a TZID that does not resolve is an error. A floating value
-// (no Z, no TZID) is read in floating (RFC 5545 §3.3.5).
+// (no Z, no TZID) is read in floating (RFC 5545 §3.3.5). A local reading
+// that a daylight-saving change repeats or skips is resolved by
+// localInstant.
 func parseDateTimeValue(value string, params ical.Params, floating *time.Location) (time.Time, error) {
+	wall, loc, err := parseDateTimeWall(value, params, floating)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return localInstant(wall, loc), nil
+}
+
+// parseDateTimeWall parses one DATE or DATE-TIME value into the reading it
+// states, carried in the fields of a UTC time, and the location that
+// reading is on: UTC for a DATE and for a UTC DATE-TIME. A recurrence runs
+// on this reading, which a reading in a daylight-saving gap does not keep
+// once resolved to an instant.
+func parseDateTimeWall(value string, params ical.Params, floating *time.Location) (time.Time, *time.Location, error) {
 	// VALUE=DATE for all-day values.
 	if params.Get(ical.ParamValue) == string(ical.ValueDate) {
-		return time.Parse("20060102", value)
+		t, err := time.Parse("20060102", value)
+		return t, time.UTC, err
 	}
 
 	loc, utc, err := dateTimeZone(value, params, floating)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, nil, err
 	}
 	if utc {
-		return time.Parse(dateTimeUTCLayout, value)
+		t, err := time.Parse(dateTimeUTCLayout, value)
+		return t, time.UTC, err
 	}
-	return time.ParseInLocation(dateTimeLocalLayout, value, loc)
+	t, err := time.Parse(dateTimeLocalLayout, value)
+	return t, loc, err
 }
 
 // The two DATE-TIME forms of RFC 5545 §3.3.5: UTC with a trailing Z, and

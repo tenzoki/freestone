@@ -326,3 +326,17 @@ from_address = "`+from+`"
 		}
 	}
 }
+
+func TestLoad_AuditFileRelativePath(t *testing.T) {
+	p := writeTOML(t, `
+[server]
+audit_file = "audit.jsonl"
+
+[files]
+rules_file = "/tmp/rules"
+`)
+	_, err := Load(p)
+	if err == nil || !strings.Contains(err.Error(), "server.audit_file must be an absolute path") {
+		t.Errorf("expected audit_file absolute path error, got: %v", err)
+	}
+}

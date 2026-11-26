@@ -44,6 +44,17 @@ func runServe(args []string) error {
 	}
 	defer logCloser.Close()
 
+	auditLogger, auditPath, err := openAuditLog(cfg.Server.AuditFile)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := auditLogger.Close(); err != nil {
+			log.Error("audit log close failed", "path", auditPath, "err", err)
+		}
+	}()
+	log.Info("audit log open", "path", auditPath)
+
 	resolver, err := secrets.New()
 	if err != nil {
 		return err
@@ -52,7 +63,7 @@ func runServe(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	deps := mcpsrv.Deps{Log: log}
+	deps := mcpsrv.Deps{Log: log, Audit: auditLogger}
 
 	// Wire calendar providers.
 	var calProviders []calendar.Provider

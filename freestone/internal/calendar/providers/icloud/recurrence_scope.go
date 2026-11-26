@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
-	"github.com/teambition/rrule-go"
 
 	"github.com/kai/freestone/internal/calendar"
 )
@@ -221,15 +220,17 @@ func (w wallShift) zero() bool { return w.days == 0 && w.clock == 0 }
 // of UTC, where a DATE's UTC midnight is the evening before.
 func (w wallShift) applyToDate(t time.Time) time.Time {
 	y, m, d := t.Date()
-	return time.Date(y, m, d+w.days, 0, 0, 0, 0, t.Location())
+	return localInstant(time.Date(y, m, d+w.days, 0, 0, 0, 0, time.UTC), t.Location())
 }
 
-// apply moves t on the wall clock of its own location. time.Date
-// normalises the sum, so a clock change past midnight rolls the date, and
-// an hour lost or gained at a daylight-saving change is not counted.
+// apply moves t on the wall clock of its own location. The sum is
+// normalised, so a clock change past midnight rolls the date, and an hour
+// lost or gained at a daylight-saving change is not counted. The reading
+// reached is resolved as the moved series' own readings are
+// (localInstant), so both name the same instant in a repeated or skipped
+// hour.
 func (w wallShift) apply(t time.Time) time.Time {
-	y, m, d := t.Date()
-	return time.Date(y, m, d+w.days, t.Hour(), t.Minute(), t.Second(), t.Nanosecond()+int(w.clock), t.Location())
+	return localInstant(wallClock(t).AddDate(0, 0, w.days).Add(w.clock), t.Location())
 }
 
 // shiftSeries carries a start move of the series s to every value that
@@ -251,7 +252,7 @@ func (w wallShift) apply(t time.Time) time.Time {
 // a bounded one, where a moved bound goes wrong, lies past the scan.
 // Otherwise the move is refused; the caller writes nothing, since only the
 // in-memory copy has been edited.
-func shiftSeries(s *series, w wallShift, seriesLoc, floating *time.Location, before *rrule.Set) error {
+func shiftSeries(s *series, w wallShift, seriesLoc, floating *time.Location, before *occurrenceSet) error {
 	if w.zero() {
 		return nil
 	}
@@ -326,8 +327,8 @@ func shiftSeries(s *series, w wallShift, seriesLoc, floating *time.Location, bef
 // is; a bounded set not walked to its end is refused, since its end is
 // where a moved UNTIL or COUNT would lose or add occurrences. Iterator() is
 // used, never Between().
-func shiftMismatch(before, after *rrule.Set, w wallShift, seriesLoc *time.Location, show func(time.Time) string) string {
-	nextBefore, nextAfter := before.Iterator(), after.Iterator()
+func shiftMismatch(before, after *occurrenceSet, w wallShift, seriesLoc *time.Location, show func(time.Time) string) string {
+	nextBefore, nextAfter := before.iterator(), after.iterator()
 	for i := 0; i < maxOccurrenceScan; i++ {
 		b, okBefore := nextBefore()
 		a, okAfter := nextAfter()
@@ -343,31 +344,10 @@ func shiftMismatch(before, after *rrule.Set, w wallShift, seriesLoc *time.Locati
 			return fmt.Sprintf("its occurrence at %s would move to %s, but the moved series generates %s in its place", show(b), show(want), show(a))
 		}
 	}
-	if endless(before) && endless(after) {
+	if before.endless() && after.endless() {
 		return ""
 	}
-	return fmt.Sprintf("the series ends at %s but has more than %d occurrences, the most a move is verified over, so the move cannot be verified to the series' end", setBound(before, show), maxOccurrenceScan)
-}
-
-// endless reports whether set has no last occurrence: an RRULE without
-// UNTIL or COUNT. RDATEs alone are always finite.
-func endless(set *rrule.Set) bool {
-	r := set.GetRRule()
-	return r != nil && r.OrigOptions.Count == 0 && r.OrigOptions.Until.IsZero()
-}
-
-// setBound names what ends a set that is not endless: its rule's COUNT or
-// UNTIL, or, without a rule, its RDATEs.
-func setBound(set *rrule.Set, show func(time.Time) string) string {
-	r := set.GetRRule()
-	switch {
-	case r == nil:
-		return "its last RDATE"
-	case r.OrigOptions.Count > 0:
-		return fmt.Sprintf("its rule's COUNT=%d", r.OrigOptions.Count)
-	default:
-		return "its rule's UNTIL " + show(r.OrigOptions.Until)
-	}
+	return fmt.Sprintf("the series ends at %s but has more than %d occurrences, the most a move is verified over, so the move cannot be verified to the series' end", before.bound(show), maxOccurrenceScan)
 }
 
 // pinningRuleParts names the RRULE parts of props that pin an occurrence
@@ -437,49 +417,34 @@ func shiftValues(props ical.Props, name string, w wallShift, seriesLoc, floating
 
 // shiftUntil moves the RRULE's UNTIL bound by w on the series' wall clock,
 // in UNTIL's own form: a DATE, a UTC DATE-TIME, or a local one. It is read
-// as rrule-go reads it, a DATE or local value in the series' location. A
-// DATE bound moves by w's whole days only: rrule-go reads it as the start
-// of its date, so it admits the occurrences on earlier dates, and moving it
-// by the days each occurrence's date moves keeps the same ones in the
-// common case. shiftMismatch decides whether it does.
+// by ruleUntil, as the series' recurrence set reads it. A DATE bound moves
+// by w's whole days only: it is read as the start of its date, so it
+// admits the occurrences on earlier dates, and moving it by the days each
+// occurrence's date moves keeps the same ones in the common case.
+// shiftMismatch decides whether it does.
 func shiftUntil(props ical.Props, w wallShift, seriesLoc *time.Location) error {
 	p := props.Get(ical.PropRecurrenceRule)
 	if p == nil {
 		return nil
 	}
+	t, layout, err := ruleUntil(p.Value, seriesLoc)
+	if err != nil || t.IsZero() {
+		return err
+	}
+	var shifted time.Time
+	switch layout {
+	case dateLayout:
+		shifted = w.applyToDate(t)
+	case dateTimeUTCLayout:
+		shifted = w.apply(t.In(seriesLoc)).UTC()
+	default:
+		shifted = w.apply(t)
+	}
 	parts := strings.Split(p.Value, ";")
 	for i, part := range parts {
-		key, v, ok := strings.Cut(part, "=")
-		if !ok || !strings.EqualFold(key, "UNTIL") {
-			continue
+		if key, _, ok := strings.Cut(part, "="); ok && strings.EqualFold(key, "UNTIL") {
+			parts[i] = key + "=" + shifted.Format(layout)
 		}
-		var layout string
-		var t time.Time
-		var err error
-		switch {
-		case len(v) == len("20060102"):
-			layout = "20060102"
-			t, err = time.ParseInLocation(layout, v, seriesLoc)
-		case strings.HasSuffix(v, "Z"):
-			layout = dateTimeUTCLayout
-			t, err = time.Parse(layout, v)
-		default:
-			layout = dateTimeLocalLayout
-			t, err = time.ParseInLocation(layout, v, seriesLoc)
-		}
-		if err != nil {
-			return fmt.Errorf("parse RRULE UNTIL %q: %w", v, err)
-		}
-		var shifted time.Time
-		switch layout {
-		case "20060102":
-			shifted = w.applyToDate(t)
-		case dateTimeUTCLayout:
-			shifted = w.apply(t.In(seriesLoc)).UTC()
-		default:
-			shifted = w.apply(t.In(seriesLoc))
-		}
-		parts[i] = key + "=" + shifted.Format(layout)
 	}
 	p.Value = strings.Join(parts, ";")
 	return nil

@@ -164,7 +164,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 				Bcc:                input.Bcc,
 			}
 			draftID, err := p.SaveDraftReply(ctx, d)
-			auditLog(al, "mail_save_draft_reply", input.Provider, map[string]string{
+			auditLog(al, log, "mail_save_draft_reply", input.Provider, map[string]string{
 				"subject":        input.Subject,
 				"in_reply_to_id": input.InReplyToID,
 			}, err)
@@ -188,7 +188,7 @@ func registerMailTools(srv *mcp.Server, reg *mail.Registry, al *audit.Logger, lo
 				return errResult(err), nil, nil
 			}
 			err = p.MarkRead(ctx, input.MailboxID, input.ID)
-			auditLog(al, "mail_mark_read", input.Provider, map[string]string{
+			auditLog(al, log, "mail_mark_read", input.Provider, map[string]string{
 				"mailbox_id": input.MailboxID,
 				"id":         input.ID,
 			}, err)

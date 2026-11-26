@@ -29,7 +29,7 @@ func withLog[T any](log *slog.Logger, name string,
 
 // auditLog records a write tool invocation. Called after the tool handler
 // returns so that both success and failure are captured.
-func auditLog(logger *audit.Logger, tool, provider string, inputs map[string]string, err error) {
+func auditLog(logger *audit.Logger, log *slog.Logger, tool, provider string, inputs map[string]string, err error) {
 	if logger == nil {
 		return
 	}
@@ -44,6 +44,9 @@ func auditLog(logger *audit.Logger, tool, provider string, inputs map[string]str
 		rec.Outcome = "error"
 		rec.Error = err.Error()
 	}
-	// Best-effort: audit log write failures are not surfaced to the caller.
-	logger.Log(rec)
+	// Best-effort: a failed audit write does not fail the tool, whose write
+	// has already happened, but it must not vanish either.
+	if logErr := logger.Log(rec); logErr != nil {
+		log.Error("audit record not written", slog.String("tool", tool), slog.String("err", logErr.Error()))
+	}
 }
