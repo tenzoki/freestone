@@ -1,6 +1,7 @@
 package icloud
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/emersion/go-ical"
@@ -21,11 +22,13 @@ func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windo
 		return nil, nil
 	}
 
-	dtstart := base.StartUTC
+	dtstart, err := recurrenceStart(vevent)
+	if err != nil {
+		return nil, err
+	}
 	duration := base.EndUTC.Sub(base.StartUTC)
 
-	ruleStr := "DTSTART:" + dtstart.UTC().Format("20060102T150405Z") + "\nRRULE:" + rruleProp.Value
-	rule, err := rrule.StrToRRule(ruleStr)
+	rule, err := ruleInLocation(rruleProp.Value, dtstart)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +86,7 @@ func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windo
 		e.InstanceStartUTC = instUTC
 
 		if base.TZID != "" {
-			loc, err := time.LoadLocation(base.TZID)
+			loc, err := resolveLocation(base.TZID)
 			if err == nil {
 				e.StartLocal = instUTC.In(loc).Format(time.RFC3339)
 				e.EndLocal = e.EndUTC.In(loc).Format(time.RFC3339)
@@ -94,4 +97,33 @@ func expandRRule(vevent *ical.Component, base calendar.Event, windowStart, windo
 	}
 
 	return events, nil
+}
+
+// recurrenceStart returns the VEVENT's DTSTART in the event's own location.
+// The recurrence must be generated on that local wall clock: generating it
+// from the UTC instant pins every occurrence to the UTC offset in force at
+// DTSTART, which shifts the local hour across DST and evaluates BYDAY on the
+// UTC date instead of the local one.
+func recurrenceStart(vevent *ical.Component) (time.Time, error) {
+	p := vevent.Props.Get(ical.PropDateTimeStart)
+	if p == nil {
+		return time.Time{}, fmt.Errorf("recurring event has no DTSTART")
+	}
+	start, _, _, err := parseDateTime(p)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse DTSTART %q: %w", p.Value, err)
+	}
+	return start, nil
+}
+
+// ruleInLocation builds the RRULE anchored at dtstart. A floating UNTIL is
+// read in dtstart's location, matching how RFC 5545 relates UNTIL to a
+// zoned DTSTART.
+func ruleInLocation(rruleValue string, dtstart time.Time) (*rrule.RRule, error) {
+	opt, err := rrule.StrToROptionInLocation(rruleValue, dtstart.Location())
+	if err != nil {
+		return nil, fmt.Errorf("parse RRULE %q: %w", rruleValue, err)
+	}
+	opt.Dtstart = dtstart
+	return rrule.NewRRule(*opt)
 }

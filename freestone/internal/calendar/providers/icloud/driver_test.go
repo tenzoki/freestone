@@ -224,3 +224,96 @@ func TestExpandRRule_WithUNTIL(t *testing.T) {
 		t.Fatalf("expected 5 instances (Apr 1-5), got %d", len(events))
 	}
 }
+
+// zonedWeeklyEvent builds a VEVENT whose DTSTART/DTEND carry a TZID, the
+// shape iCloud writes for a recurring meeting created in a local zone.
+func zonedWeeklyEvent(uid, tzid, dtstart, dtend, rrule string) *ical.Component {
+	vevent := ical.NewComponent(ical.CompEvent)
+	vevent.Props.SetText(ical.PropUID, uid)
+
+	startProp := ical.NewProp(ical.PropDateTimeStart)
+	startProp.Value = dtstart
+	startProp.Params.Set("TZID", tzid)
+	vevent.Props.Set(startProp)
+
+	endProp := ical.NewProp(ical.PropDateTimeEnd)
+	endProp.Value = dtend
+	endProp.Params.Set("TZID", tzid)
+	vevent.Props.Set(endProp)
+
+	rruleProp := ical.NewProp("RRULE")
+	rruleProp.Value = rrule
+	vevent.Props.Set(rruleProp)
+	return vevent
+}
+
+func expandDecoded(t *testing.T, vevent *ical.Component, windowStart, windowEnd time.Time) []calendar.Event {
+	t.Helper()
+	base, err := decodeVEvent(vevent, "", "/cal/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := expandRRule(vevent, base, windowStart, windowEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+// D3: a weekly 09:00 Europe/Berlin series started in winter (CET, UTC+1)
+// must still be at 09:00 local in summer (CEST, UTC+2), i.e. 07:00Z, not
+// pinned to the winter UTC instant 08:00Z.
+func TestExpandRRule_KeepsLocalWallClockAcrossDST(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vevent := zonedWeeklyEvent("dst-1", "Europe/Berlin", "20260105T090000", "20260105T100000", "FREQ=WEEKLY")
+
+	events := expandDecoded(t, vevent, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+	if len(events) == 0 {
+		t.Fatal("expected July instances, got none")
+	}
+
+	want := time.Date(2026, 7, 6, 7, 0, 0, 0, time.UTC)
+	if !events[0].StartUTC.Equal(want) {
+		t.Errorf("first July instance StartUTC = %v, want %v (09:00 CEST)", events[0].StartUTC, want)
+	}
+	for _, e := range events {
+		local := e.StartUTC.In(berlin)
+		if local.Hour() != 9 || local.Minute() != 0 {
+			t.Errorf("instance %v is %s local, want 09:00", e.StartUTC, local.Format("15:04"))
+		}
+		if e.EndUTC.Sub(e.StartUTC) != time.Hour {
+			t.Errorf("instance %v duration = %v, want 1h", e.StartUTC, e.EndUTC.Sub(e.StartUTC))
+		}
+		if e.StartLocal != local.Format(time.RFC3339) {
+			t.Errorf("StartLocal = %q, want %q", e.StartLocal, local.Format(time.RFC3339))
+		}
+	}
+}
+
+// D3: BYDAY is evaluated on the event's local date. A Monday 00:30 Berlin
+// series is Sunday 23:30Z in winter; expanded in UTC it lands on Tuesdays.
+func TestExpandRRule_BYDAYUsesLocalDateAcrossDST(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vevent := zonedWeeklyEvent("dst-2", "Europe/Berlin", "20260302T003000", "20260302T013000", "FREQ=WEEKLY;BYDAY=MO;COUNT=6")
+
+	events := expandDecoded(t, vevent, time.Time{}, time.Time{})
+	if len(events) != 6 {
+		t.Fatalf("expected 6 instances, got %d", len(events))
+	}
+	for _, e := range events {
+		local := e.StartUTC.In(berlin)
+		if local.Weekday() != time.Monday || local.Hour() != 0 || local.Minute() != 30 {
+			t.Errorf("instance %v is %s local, want Monday 00:30", e.StartUTC, local.Format("Mon 15:04"))
+		}
+	}
+	// The series crosses the 2026-03-29 switch: the last instance is in CEST.
+	if _, offset := events[len(events)-1].StartUTC.In(berlin).Zone(); offset != 2*3600 {
+		t.Errorf("last instance offset = %d, want CEST (+7200)", offset)
+	}
+}

@@ -116,9 +116,11 @@ func parseDateTime(p *ical.Prop) (t time.Time, tzid string, allDay bool, err err
 		return t, tzid, allDay, err
 	}
 
-	// Try parsing with explicit timezone.
+	// Try parsing with explicit timezone. An unresolvable TZID still falls
+	// through to the UTC/floating parse below; that fallback is intentional
+	// until unknown zones are reported as decode errors.
 	if tzid != "" {
-		loc, locErr := time.LoadLocation(tzid)
+		loc, locErr := resolveLocation(tzid)
 		if locErr == nil {
 			t, err = time.ParseInLocation("20060102T150405", p.Value, loc)
 			return t, tzid, false, err
